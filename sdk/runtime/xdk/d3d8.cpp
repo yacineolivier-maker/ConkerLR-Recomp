@@ -980,6 +980,7 @@ HLE_STDCALL(D3DDevice_SetPixelShader, 1) {
     put(gpu::kMPsCombinerCount, d[53]);
     put(gpu::kMPsDotMapping, d[55]);
     put(gpu::kMPsInputTexture, d[56]);
+    put(0x1E70, d[54]);  // the shader stage program, as the XDK loads it too: push buffers run with it
     SetComplex(gpu::kRsPsTextureModes, d[54]);
     return 0;
 }
@@ -1335,7 +1336,7 @@ std::shared_ptr<gpu::PixelShader> Combiners() {
     d[43] = Simple(0x1E20);
     d[44] = Simple(0x1E24);
     d[53] = Simple(0x1E60);
-    d[54] = Simple(0x1E6C);
+    d[54] = Simple(0x1E70);  // SET_SHADER_STAGE_PROGRAM
     d[55] = Simple(0x1E74);
     d[56] = Simple(0x1E78);
     auto& ps = made[Fnv(d, sizeof(d))];
@@ -1392,7 +1393,7 @@ void Bind() {
         t[gpu::kTssAlphaKill] = c0 & 4 ? 4 : 0;
     }
     g_state.ps = Combiners();
-    g_state.rs[gpu::kRsPsTextureModes] = Simple(0x1E6C);
+    g_state.rs[gpu::kRsPsTextureModes] = Simple(0x1E70);
     // the complex states the renderer keeps as D3D values
     g_state.rs[gpu::kRsZEnable] = Simple(0x30C);
     g_state.rs[gpu::kRsStencilEnable] = Simple(0x32C);
@@ -1417,6 +1418,8 @@ void EndPrimitive() {
     } else if (g_backend) {
         SyncDeferred();
         Bind();
+        if (g_state.textures[0] | g_state.textures[1]) LOG_FIRST(20, "d3d: push buffer draw: stage modes %08X, textures %08X %08X %08X %08X, control0 %08X %08X", Simple(0x1E70),
+                  g_state.textures[0], g_state.textures[1], g_state.textures[2], g_state.textures[3], Simple(0x1B0C), Simple(0x1B4C));
         uint32_t lo = *std::min_element(g_indices.begin(), g_indices.end());
         uint32_t hi = *std::max_element(g_indices.begin(), g_indices.end());
         if (hi - lo < 0x10000) {
@@ -1476,6 +1479,7 @@ void Run(uint32_t p, uint32_t end) {
         uint32_t head = R32(p);
         p += 4;
         if ((head & 3) == 1) {  // jump, old form: address | 1
+            LOG_FIRST(30, "d3d: push buffer jump %08X -> %08X (end %08X)", p - 4, Guest(head & ~3u), end);
             p = Guest(head & ~3u);
             continue;
         }
@@ -1484,6 +1488,7 @@ void Run(uint32_t p, uint32_t end) {
             continue;
         }
         if ((head & 3) == 2) {  // call
+            LOG_FIRST(30, "d3d: push buffer call %08X -> %08X", p - 4, Guest(head & ~3u));
             ret = p;
             p = Guest(head & ~3u);
             continue;
