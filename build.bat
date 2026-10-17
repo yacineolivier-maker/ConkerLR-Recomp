@@ -1,6 +1,6 @@
 @echo off
 setlocal
-set "GAME_TITLE=Conker: Live & Reloaded"
+set "GAME_TITLE=Conker - Live and Reloaded"
 set "GAME_XBE=default.xbe"
 set "GAME_EXE=Conker"
 title %GAME_TITLE% - Build
