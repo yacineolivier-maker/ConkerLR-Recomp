@@ -42,6 +42,11 @@ LONG WINAPI WriteCrashDump(EXCEPTION_POINTERS* e) {
     if (kernel::Thread* t = kernel::Current(); e && t && t->ctx) {
         auto* r = e->ExceptionRecord;
         LOGE("exception %08lX at %p on guest thread %X", r->ExceptionCode, r->ExceptionAddress, t->id);
+        // image-relative, for llvm-symbolizer --obj=<exe>.exe 0x140000000+rva
+        LOGE("  host rva %llX, last indirect call %08X",
+             (unsigned long long)(reinterpret_cast<uintptr_t>(r->ExceptionAddress) -
+                                  reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr))),
+             t->ctx->last_icall);
         if (r->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && r->NumberParameters >= 2) {
             uint64_t va = r->ExceptionInformation[1], g = uint64_t(reinterpret_cast<uintptr_t>(kernel::g_base));
             LOGE("  %s %llX, guest %08llX", r->ExceptionInformation[0] ? "write" : "read", (unsigned long long)va,

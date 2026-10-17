@@ -118,9 +118,9 @@ static bool LoadConfig(const fs::path& path, Config& cfg, const fs::path& xdk_di
             std::vector<std::string> locs;
             for (auto& x : *a) {
                 std::string s = x.value<std::string>().value_or("");
-                static const std::set<std::string> known{"stack", "eax", "ebx", "ecx", "edx", "esi", "edi", "ebp"};
-                if (!known.count(s)) return fail("\"" + s + "\" is not stack, eax, ebx, ecx, edx, esi, edi or ebp");
-                if (s != "stack" && std::count(locs.begin(), locs.end(), s)) return fail(s + " holds two arguments");
+                static const std::set<std::string> known{"stack", "none", "eax", "ebx", "ecx", "edx", "esi", "edi", "ebp"};
+                if (!known.count(s)) return fail("\"" + s + "\" is not stack, none, eax, ebx, ecx, edx, esi, edi or ebp");
+                if (s != "stack" && s != "none" && std::count(locs.begin(), locs.end(), s)) return fail(s + " holds two arguments");
                 locs.push_back(s);
             }
             cfg.abi[name] = locs;

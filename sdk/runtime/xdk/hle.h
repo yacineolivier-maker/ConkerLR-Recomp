@@ -19,7 +19,8 @@
 #define IMAGE_ABI(X)
 #endif
 namespace hle {
-enum Loc : uint8_t { stack, eax, ecx, edx, ebx, esi, edi, ebp };
+// none: an argument link time code generation removed (a constant at every call), read as 0 and never passed
+enum Loc : uint8_t { stack, eax, ecx, edx, ebx, esi, edi, ebp, none };
 constexpr int kMaxArgs = 16;
 struct Map {
     bool mapped = false;
@@ -59,10 +60,10 @@ constexpr Map Fastcall(int stack_args) {
 }
 // by Loc
 inline constexpr uint32_t X86Context::* kReg[] = {nullptr, &X86Context::eax, &X86Context::ecx, &X86Context::edx,
-                                                 &X86Context::ebx, &X86Context::esi, &X86Context::edi, &X86Context::ebp};
+                                                 &X86Context::ebx, &X86Context::esi, &X86Context::edi, &X86Context::ebp, nullptr};
 // API argument i at the function's entry, 0 past the map
 inline uint32_t Read(const X86Context& ctx, const Map& m, int i) {
-    if (i >= m.n) return 0;
+    if (i >= m.n || m.loc[i] == none) return 0;
     return m.loc[i] == stack ? ::kernel::R32(ctx.esp + 4 + 4 * uint32_t(m.slot[i])) : ctx.*kReg[m.loc[i]];
 }
 // S::map is the function's map
@@ -78,7 +79,7 @@ inline uint32_t Call(X86Context& ctx, uint32_t fn, const Map& m, std::initialize
     uint32_t pushed[kMaxArgs] = {}, n = 0, i = 0;
     for (uint32_t v : args) {
         if (m.loc[i] == stack) pushed[n++] = v;
-        else ctx.*kReg[m.loc[i]] = v;
+        else if (m.loc[i] != none) ctx.*kReg[m.loc[i]] = v;
         i++;
     }
     uint32_t r = ::kernel::CallGuest(ctx, fn, pushed, n);

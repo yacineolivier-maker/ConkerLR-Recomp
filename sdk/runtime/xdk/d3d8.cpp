@@ -39,6 +39,10 @@ using namespace kernel;
 #define SYM_D3DDevice_GetVertexShaderFunction FFFFFE03
 #define HAS_D3DDevice_GetVertexShaderFunction 0
 #endif
+#ifndef SYM_D3DDevice_Reset
+#define SYM_D3DDevice_Reset FFFFFE04
+#define HAS_D3DDevice_Reset 0
+#endif
 
 namespace d3d {
 
@@ -319,6 +323,39 @@ HLE_STDCALL(Direct3D_CreateDevice, 6) {
     UpdateViewportConstants();
     ApplyDefaultStates(ctx);
     if (a[5]) W32(a[5], kDevice);
+    return 0;
+}
+
+// Reset(present parameters): the swap chain at a new size or format. The library's own Reset reprograms the
+// NV2A's FIFO and display registers, which the host has none of: the buffers are made anew, as CreateDevice does.
+HLE_STDCALL(D3DDevice_Reset, 1) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    uint32_t pp = a[0];
+    uint32_t w = R32(pp), h = R32(pp + 4), fmt = R32(pp + 8), count = std::max<uint32_t>(R32(pp + 12), 1);
+    uint32_t auto_depth = R32(pp + 0x20), depth_fmt = R32(pp + 0x24);
+    if (!w) w = 640;
+    if (!h) h = 480;
+    LOGI("d3d: Reset %ux%u format %X buffers %u depth %u format %X flags %X", w, h, fmt, count, auto_depth, depth_fmt,
+         R32(pp + 0x28));
+    uint32_t color_fmt = gpu::LinearColorFormat(fmt);
+    g_buffer_count = std::min<uint32_t>(count + 1, 3);
+    for (uint32_t i = 0; i < g_buffer_count; i++) g_buffers[i] = NewSurface(w, h, color_fmt, 4);
+    g_depth = 0;
+    if (auto_depth) {
+        uint32_t zf = gpu::LinearDepthFormat(depth_fmt);
+        g_depth = NewSurface(w, h, zf, zf == 0x30 || zf == 0x31 ? 2 : 4);
+    }
+    SetDev(kDevRenderTarget, g_buffers[1]);
+    SetDev(kDevDepth, g_depth);
+    SetDev(kDevBackBuffer, g_buffers[1]);
+    SetDev(kDevFrontBuffer, g_buffers[1]);
+    if (XDK_CDevice_AutoDepth != xdk::kUnknown) SetDev(XDK_CDevice_AutoDepth, g_depth);
+    float zs = g_depth && (R32(g_depth + 12) >> 8 & 0xFF) == 0x30 ? 65535.0f : 16777215.0f;
+    std::memcpy(HostPtr(kDevice + kDevZScale), &zs, 4);
+    g_state.viewport = {0, 0, w, h, 0.0f, 1.0f};
+    g_state.rt = SurfaceOf(g_buffers[1]);
+    g_state.zs = SurfaceOf(g_depth);
+    UpdateViewportConstants();
     return 0;
 }
 

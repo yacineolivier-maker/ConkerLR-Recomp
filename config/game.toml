@@ -11,6 +11,7 @@ code_sections = [".text", "D3DX", "XNET", "XONLINE", "DSOUND", "XMV", "WMADEC", 
 
 # extra entry points
 [functions]
+0x498D00 = ""  # appel indirect (log)
 
 # functions the host replaces or calls by name, 0 where the image has none
 [symbols]
@@ -91,6 +92,7 @@ D3DDevice_LightEnable                                = 0
 D3DDevice_LoadVertexShader                           = 0
 D3DDevice_MakeSpace                                  = 0
 D3DDevice_PersistDisplay                             = 0x53A0E0
+D3DDevice_Reset                                      = 0x538D50  # trouvé à la main (appelé par 0x2A79BA)
 D3DDevice_Release                                    = 0
 D3DDevice_SelectVertexShader                         = 0x536210
 D3DDevice_SetFlickerFilter                           = 0
@@ -254,14 +256,14 @@ XOnlineCleanup                                       = 0
 XOnlineStartup                                       = 0x4A0A8E
 
 [data]
-D3D_DeferredTextureState    = 0
+D3D_DeferredTextureState    = 0x547330  # TexCoordIndex écrit [stage*0x80 + 28*4] à 0x5473A0
 D3D_Device                  = 0x547540
-D3D_DirtyFlags              = 0
-D3D_IndexData               = 0
+D3D_DirtyFlags              = 0x5499F0  # SelectVertexShader / SetPixelShader : or [0x5499F0]
+D3D_IndexData               = 0x54A898  # SetIndices y range pIndexData->Data
 D3D_pDevice                 = 0x5499E8
-D3D_RenderState             = 0
-D3D_SimpleRenderStateEncode = 0
-D3D_Streams                 = 0
+D3D_RenderState             = 0x5499F8  # 6 setters complexes (CullMode 147 -> 0x549C44, ...)
+D3D_SimpleRenderStateEncode = 0x5B1108  # .rdata : 0x40260, 0x40264, ...
+D3D_Streams                 = 0x547158  # SetStreamSource : tampon à [n*12 + 0x547160]
 DSound_StreamVtable         = 0x586038
 DSound_StreamVtable2        = 0x586028
 XPP_GamepadType             = 0x558454
@@ -270,20 +272,21 @@ XPP_MemoryUnitType          = 0x5583D8
 # argument locations in API order for functions a link time code generated library compiled with another
 # convention: a register (eax ebx ecx edx esi edi ebp) or "stack" for the next stack slot, which the callee pops
 [abi]
-CDevice_KickOff = ["?"]  # reads edx, pops 0
-D3DDevice_DrawVertices = ["?", "?", "?"]  # reads eax ecx, pops 4
-D3DDevice_GetVertexShaderFunction = ["?", "?", "?"]  # reads eax ecx edx, pops 0
-D3DDevice_SelectVertexShader = ["?", "?"]  # reads eax ebx, pops 0
-D3DDevice_SetIndices = ["?", "?"]  # reads ebx, pops 4
-D3DDevice_SetPixelShader = ["?"]  # reads eax, pops 0
-D3DDevice_SetPixelShaderConstant = ["?", "?", "?"]  # reads eax ecx, pops 4
-D3DDevice_SetShaderConstantMode = ["?"]  # reads eax, pops 0
-D3DDevice_SetStreamSource = ["?", "?", "?"]  # reads eax ebx, pops 4
-D3DDevice_SetTexture = ["?", "?"]  # reads eax, pops 4
-D3DDevice_SetTextureState_TexCoordIndex = ["?", "?"]  # reads esi, pops 4
-D3DDevice_SetTransform = ["?", "?"]  # reads eax edx, pops 0
-D3DDevice_Swap = ["?"]  # reads eax, pops 0
-D3DResource_IsBusy = ["?"]  # reads ecx, pops 0
-D3D_InternalRelease = ["?"]  # reads esi, pops 0
-D3D_MakeRequestedSpace = ["?", "?"]  # reads eax, pops 4
-Direct3D_CreateDevice = ["?", "?", "?", "?", "?", "?"]  # reads eax ecx, pops 4
+CDevice_KickOff = ["edx"]  # reads edx, pops 0
+D3DDevice_DrawVertices = ["stack", "ecx", "eax"]  # reads eax ecx, pops 4
+D3DDevice_GetVertexShaderFunction = ["edx", "eax", "ecx"]  # reads eax ecx edx, pops 0
+D3DDevice_SelectVertexShader = ["eax", "ebx"]  # reads eax ebx, pops 0
+D3DDevice_SetIndices = ["ebx", "stack"]  # reads ebx, pops 4
+D3DDevice_SetPixelShader = ["eax"]  # reads eax, pops 0
+D3DDevice_SetPixelShaderConstant = ["ecx", "stack", "eax"]  # reads eax ecx, pops 4
+D3DDevice_SetShaderConstantMode = ["eax"]  # reads eax, pops 0
+D3DDevice_SetStreamSource = ["eax", "ebx", "stack"]  # reads eax ebx, pops 4
+D3DDevice_SetTexture = ["eax", "stack"]  # reads eax, pops 4
+D3DDevice_SetTextureState_TexCoordIndex = ["esi", "stack"]  # reads esi, pops 4
+D3DDevice_SetTransform = ["eax", "edx"]  # reads eax edx, pops 0
+D3DDevice_Swap = ["eax"]  # reads eax, pops 0
+D3DResource_IsBusy = ["ecx"]  # reads ecx, pops 0
+D3D_InternalRelease = ["esi"]  # reads esi, pops 0
+D3D_MakeRequestedSpace = ["stack", "eax"]  # reads eax, pops 4
+D3DDevice_Reset = ["ebx"]  # 0x2A79B6 : lea ebx, [esp+0xC] ; pops 0
+Direct3D_CreateDevice = ["none", "none", "none", "eax", "stack", "ecx"]  # reads eax ecx, pops 4
