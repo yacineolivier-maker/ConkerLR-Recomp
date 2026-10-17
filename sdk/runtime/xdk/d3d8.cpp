@@ -330,6 +330,7 @@ HLE_STDCALL(Direct3D_CreateDevice, 6) {
 // NV2A's FIFO and display registers, which the host has none of: the buffers are made anew, as CreateDevice does.
 HLE_STDCALL(D3DDevice_Reset, 1) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
     uint32_t pp = a[0];
     uint32_t w = R32(pp), h = R32(pp + 4), fmt = R32(pp + 8), count = std::max<uint32_t>(R32(pp + 12), 1);
     uint32_t auto_depth = R32(pp + 0x20), depth_fmt = R32(pp + 0x24);
@@ -407,6 +408,7 @@ HLE_STDCALL(D3DResource_BlockUntilNotBusy, 1) {
 }
 HLE_STDCALL(D3DResource_IsBusy, 1) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
     uint32_t res = a[0];
     if (!res) return 0;
     // set on the device, a surface also through its texture
@@ -417,23 +419,28 @@ HLE_STDCALL(D3DResource_IsBusy, 1) {
 HLE_STDCALL(D3D_BlockOnTime, 2) { return 0; }
 HLE_STDCALL(D3DDevice_BlockOnFence, 1) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
     if (g_backend) g_backend->WaitFence(a[0]);
     return 0;
 }
 HLE_STDCALL(D3DDevice_InsertFence, 0) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
     return g_backend ? g_backend->Fence() : 0;
 }
 HLE_STDCALL(D3DDevice_IsFencePending, 1) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
     return g_backend && g_backend->FencePending(a[0]) ? 1 : 0;
 }
 HLE_STDCALL(D3D_SetFence, 1) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
     return g_backend ? g_backend->Fence() : 0;
 }
 HLE_STDCALL(D3D_KickOffAndWaitForIdle, 0) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
     if (g_backend) g_backend->Flush();
     return 0;
 }
@@ -461,6 +468,7 @@ HLE_STDCALL(D3DDevice_EnableOverlay, 1) { return 0; }
 // fade from it at its first frames
 HLE_STDCALL(D3DDevice_PersistDisplay, 0) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
     uint32_t front = g_buffers[0], size = R32(front + 0x10);
     uint32_t pitch = ((size >> 24 & 0xFF) + 1) * 64, height = (size >> 12 & 0xFFF) + 1, bytes = pitch * height;
     uint32_t data = mem::VirtualFromPhysical(R32(front + 4));
@@ -482,6 +490,7 @@ HLE_STDCALL(D3DDevice_SetGammaRamp, 2) {
 
 HLE_STDCALL(D3DDevice_SetRenderTarget, 2) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
     uint32_t rt = a[0] ? a[0] : Dev(kDevRenderTarget), zs = a[1];
     AddRef(ctx, rt);
     uint32_t old_rt = Dev(kDevRenderTarget), old_zs = Dev(kDevDepth);
@@ -565,6 +574,7 @@ HLE_STDCALL(D3DDevice_Swap, 1) {
 
 HLE_STDCALL(D3DDevice_Clear, 6) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
     const uint8_t* rects = a[0] && a[1] ? static_cast<const uint8_t*>(HostPtr(a[1])) : nullptr;
     if (g_backend) g_backend->Clear(g_state, a[0], rects, a[2], a[3], ArgF(a, 4), a[5]);
     return 0;
@@ -572,12 +582,14 @@ HLE_STDCALL(D3DDevice_Clear, 6) {
 
 HLE_STDCALL(D3DDevice_CopyRects, 5) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
     if (g_backend) g_backend->Copy(SurfaceOf(a[0]), SurfaceOf(a[3]), a[2], a[1], a[4]);
     return 0;
 }
 
 HLE_STDCALL(D3DDevice_SetViewport, 1) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
     uint32_t v = a[0];
     g_state.viewport = {R32(v), R32(v + 4), R32(v + 8), R32(v + 12), GF(v + 16), GF(v + 20)};
     g_state.scissor_count = 0;
@@ -587,6 +599,7 @@ HLE_STDCALL(D3DDevice_SetViewport, 1) {
 
 HLE_STDCALL(D3DDevice_SetScissors, 3) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
     g_state.scissor_count = std::min<uint32_t>(a[0], 8);
     for (uint32_t i = 0; i < g_state.scissor_count * 4; i++) g_state.scissors[i] = R32(a[2] + i * 4);
     return 0;
@@ -716,6 +729,7 @@ HLE_WRAP(D3DDevice_LightEnable, 2) {
 
 HLE_STDCALL(D3DDevice_SetTexture, 2) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
     uint32_t stage = a[0] & 3, tex = a[1];
     uint32_t old = Dev(kDevTextures + stage * 4);
     AddRef(ctx, tex);
@@ -743,6 +757,7 @@ HLE_STDCALL(D3DDevice_SetPalette, 2) {
 // bound through a header of the stage's own holding the bound texture's fields with the new data and format.
 HLE_FASTCALL(D3DDevice_SwitchTexture, 1) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
     static uint32_t headers[4];
     // texture methods from 0x1B00, 0x40 per stage
     uint32_t stage = (((a[0] & 0x1FFC) - 0x1B00) >> 6) & 3, cur = g_state.textures[stage];
@@ -757,6 +772,7 @@ HLE_FASTCALL(D3DDevice_SwitchTexture, 1) {
 
 HLE_STDCALL(D3DDevice_SetStreamSource, 3) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
     uint32_t n = a[0] & 15, vb = a[1], stride = a[2];
     uint32_t old = R32(kStreams + n * kStreamSize + XDK_Stream_Buffer);
     AddRef(ctx, vb);
@@ -787,6 +803,7 @@ HLE_STDCALL(D3DDevice_SetIndices, 2) {
 
 HLE_STDCALL(D3DDevice_CreateVertexShader, 4) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
     uint32_t decl = a[0], func = a[1], out = a[2];
     auto vs = std::make_shared<gpu::VertexShader>();
     if (decl) {
@@ -814,6 +831,7 @@ HLE_STDCALL(D3DDevice_CreateVertexShader, 4) {
 
 HLE_STDCALL(D3DDevice_DeleteVertexShader, 1) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
     auto it = g_vs.find(a[0]);
     if (it != g_vs.end()) {
         mem::FreeSystem(a[0] & ~1u);
@@ -825,6 +843,7 @@ HLE_STDCALL(D3DDevice_DeleteVertexShader, 1) {
 // (handle, data, size in and out): the program as it was given, the size alone without data or room
 HLE_STDCALL(D3DDevice_GetVertexShaderFunction, 3) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
     auto it = g_vs.find(a[0]);
     uint32_t words = it == g_vs.end() ? 0 : uint32_t(it->second->program.size());
     uint32_t need = words ? 4 + words * 4 : 0, room = R32(a[2]);
@@ -838,6 +857,7 @@ HLE_STDCALL(D3DDevice_GetVertexShaderFunction, 3) {
 
 HLE_STDCALL(D3DDevice_SetVertexShader, 1) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
     uint32_t h = a[0];
     g_state.vs_handle = h;
     g_state.vs = nullptr;
@@ -889,6 +909,7 @@ HLE_STDCALL(D3DDevice_SelectVertexShader, 2) {
 }
 HLE_STDCALL(D3DDevice_SetShaderConstantMode, 1) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
     g_own_constants = a[0] & 0x10;  // D3DSCM_NORESERVEDCONSTANTS
     UpdateViewportConstants();
     return 0;
@@ -896,6 +917,7 @@ HLE_STDCALL(D3DDevice_SetShaderConstantMode, 1) {
 
 HLE_STDCALL(D3DDevice_CreatePixelShader, 2) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
     auto ps = std::make_shared<gpu::PixelShader>();
     std::memcpy(ps->def, HostPtr(a[0]), sizeof(ps->def));
     uint32_t rec = mem::AllocSystem(16, 16);
@@ -907,12 +929,14 @@ HLE_STDCALL(D3DDevice_CreatePixelShader, 2) {
 
 HLE_STDCALL(D3DDevice_DeletePixelShader, 1) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
     if (g_ps.erase(a[0])) mem::FreeSystem(a[0]);
     return 0;
 }
 
 HLE_STDCALL(D3DDevice_SetPixelShader, 1) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
     g_state.ps = nullptr;
     if (!a[0]) return 0;
     auto it = g_ps.find(a[0]);
@@ -958,6 +982,7 @@ HLE_STDCALL(D3DDevice_SetPixelShader, 1) {
 
 HLE_STDCALL(D3DDevice_SetPixelShaderConstant, 3) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
     uint32_t reg = a[0], src = a[1], n = a[2];
     for (uint32_t i = 0; i < n && reg + i < 16; i++) std::memcpy(g_state.psc[reg + i].data(), HostPtr(src + i * 16), 16);
     gpu::ApplyPixelConstants(g_state, reg, n);
@@ -1088,13 +1113,18 @@ void EndPrimitive() {
 
 // reads the commands pushed since the last call: vertex data between a begin and an end is drawn, visibility tests
 // are run, the rest is skipped
+std::vector<uint32_t> g_inline;  // inline array dwords between a pushed begin and end
+
 void Walk(uint32_t end) {
     if (!g_walk || end < g_walk || end > g_scratch_push + g_scratch_size) return;
     for (uint32_t p = g_walk; p + 4 <= end;) {
         // count in bits 18 to 28, bit 30 keeps the method for every value
         uint32_t head = R32(p), method = head & 0x1FFC, n = (head >> 18) & 0x7FF;
         p += 4;
-        if ((head & 0xA0030003) || n * 4 > end - p) break;  // anything but a method header
+        if ((head & 0xA0030003) || n * 4 > end - p) {  // anything but a method header
+            LOG_FIRST(16, "d3d: walk stops at command %08X at %08X, %u bytes before the end", head, p - 4, end - p);
+            break;
+        }
         for (uint32_t i = 0; i < n; i++, p += 4) {
             uint32_t m = head & 0x40000000 ? method : method + i * 4, v = R32(p);
             float f, *a = g_im_attr;
@@ -1106,9 +1136,25 @@ void Walk(uint32_t end) {
                     g_im_prim = v;
                     g_im_mask = 0;
                     g_im_vertices.clear();
+                    g_inline.clear();
+                } else if (!g_inline.empty()) {
+                    // vertices the title pushed whole (BeginPush with its EndPush inlined, link time code generation)
+                    uint32_t stride = VertexBytes(), bytes = uint32_t(g_inline.size()) * 4;
+                    if (g_im_prim && stride && bytes % stride == 0) {
+                        LOG_FIRST(400, "d3d: pushed primitive %u drawn, %u vertices of %u bytes, vs %08X, t0 %08X", g_im_prim, bytes / stride,
+                                  stride, g_state.vs_handle, g_state.textures[0]);
+                        DrawUp(g_im_prim, bytes / stride, g_inline.data(), stride);
+                    }
+                    else LOG_FIRST(200, "d3d: pushed primitive %u dropped, %u bytes of vertices of %u (walk %08X, %08X %08X %08X)", g_im_prim, bytes,
+                                  stride, p, g_inline[0], g_inline.size() > 1 ? g_inline[1] : 0, g_inline.size() > 2 ? g_inline[2] : 0);
+                    g_inline.clear();
+                    g_im_prim = 0;
                 } else {
                     EndPrimitive();
                 }
+                continue;
+            } else if (m == 0x1818) {  // inline array: the vertices themselves
+                if (g_im_prim) g_inline.push_back(v);
                 continue;
             } else if (m >= 0x1880 && m < 0x1900) {  // 2 floats, z = 0 and w = 1
                 a += (m - 0x1880) / 8 * 4;
@@ -1131,6 +1177,8 @@ void Walk(uint32_t end) {
                 last = m == 0x1524;
                 a[(m - 0x1518) / 4] = f;
             } else {
+                // any other method the title pushed itself is a simple state, as EndPush takes it
+                if (m >> 2 < g_state.simple.size() && !(m >= 0x1800 && m < 0x1B00)) g_state.simple[m >> 2] = v;
                 continue;
             }
             if (!g_im_prim) continue;
@@ -1154,12 +1202,14 @@ HLE_STDCALL(D3DDevice_DrawVerticesUP, 4) {
 // a primitive between two begin/end writes with its vertices inline, any other method as a simple state.
 HLE_STDCALL(D3DDevice_BeginPush, 1) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
     g_push_begin = ScratchPush(a[0] * 4);
     return g_push_begin;
 }
 
 HLE_STDCALL(D3DDevice_EndPush, 1) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
     constexpr uint32_t kBeginEnd = 0x17FC, kInlineArray = 0x1818;
     static std::vector<uint32_t> vertices;
     uint32_t prim = 0;

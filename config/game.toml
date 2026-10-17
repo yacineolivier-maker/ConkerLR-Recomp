@@ -307,3 +307,9 @@ D3D_InternalRelease = ["esi"]  # reads esi, pops 0
 D3D_MakeRequestedSpace = ["stack", "eax"]  # reads eax, pops 4
 D3DDevice_Reset = ["ebx"]  # 0x2A79B6 : lea ebx, [esp+0xC] ; pops 0
 Direct3D_CreateDevice = ["none", "none", "none", "eax", "stack", "ecx"]  # reads eax ecx, pops 4
+
+# diagnostic (src/game/diag_hooks.cpp)
+
+[[hook]]
+at = 0x252F9A
+call = "MarkVideoFrame"  # src/game/video.cpp
