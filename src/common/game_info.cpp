@@ -1,8 +1,10 @@
 #include "app/app.h"
+#include "core/input.h"
 
 namespace game {
 void StartHangWatch();  // hang_watch.cpp
 void StartApu();        // apu.cpp
+void AutoPad(int port, input::Pad& pad);  // autopad.cpp
 }
 
 // what the runtime asks of the game; strings must be set, hooks may stay null
@@ -24,6 +26,6 @@ const app::GameInfo app::kGame = {
     .window = nullptr,
     .message = nullptr,
     .ui = nullptr,
-    .pad = nullptr,
+    .pad = game::AutoPad,
     .rumble = nullptr,
 };

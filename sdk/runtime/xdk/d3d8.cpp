@@ -39,6 +39,10 @@ using namespace kernel;
 #define SYM_D3DDevice_GetVertexShaderFunction FFFFFE03
 #define HAS_D3DDevice_GetVertexShaderFunction 0
 #endif
+#ifndef SYM_D3DDevice_RunPushBuffer
+#define SYM_D3DDevice_RunPushBuffer FFFFFE05
+#define HAS_D3DDevice_RunPushBuffer 0
+#endif
 #ifndef SYM_D3DDevice_Reset
 #define SYM_D3DDevice_Reset FFFFFE04
 #define HAS_D3DDevice_Reset 0
@@ -1057,6 +1061,13 @@ uint32_t g_push_begin = 0;
 }  // namespace
 
 // Begin/End immediate mode. Titles inline Begin and the vertex data calls, so their commands are read from the scratch buffer.
+// the push buffer executor's method handling (below), which pushes the title writes itself go through as well
+namespace {
+namespace pb {
+void Method(uint32_t m, uint32_t v);
+}  // namespace pb
+}  // namespace
+
 namespace d3d {
 namespace {
 uint32_t g_im_prim = 0, g_im_mask = 0;  // open primitive, slots it wrote
@@ -1177,8 +1188,10 @@ void Walk(uint32_t end) {
                 last = m == 0x1524;
                 a[(m - 0x1518) / 4] = f;
             } else {
-                // any other method the title pushed itself is a simple state, as EndPush takes it
-                if (m >> 2 < g_state.simple.size() && !(m >= 0x1800 && m < 0x1B00)) g_state.simple[m >> 2] = v;
+                // vertex programs and constants load as on the GPU (constant writes the title inlined); any other
+                // method the title pushed itself is a simple state, as EndPush takes it
+                if ((m >= 0x0B00 && m < 0x0C00) || m == 0x1E9C || m == 0x1EA4) pb::Method(m, v);
+                else if (m >> 2 < g_state.simple.size() && !(m >= 0x1800 && m < 0x1B00)) g_state.simple[m >> 2] = v;
                 continue;
             }
             if (!g_im_prim) continue;
@@ -1242,6 +1255,292 @@ HLE_STDCALL(D3DDevice_EndPush, 1) {
     g_push_begin = 0;
     ScratchPush();
     return a[0];
+}
+
+// RunPushBuffer(push buffer, fixups): a prebuilt NV2A command stream (models built offline, or recorded) run as the
+// GPU would run it. Its methods go to the state as they come; vertex programs and constants load as on the GPU, and at
+// each end of a primitive the arrays, textures and combiners the methods set are turned into a draw.
+namespace {
+namespace pb {
+uint32_t g_prog[136 * 4], g_prog_load = 0, g_prog_comp = 0, g_const_load = 0, g_const_comp = 0;
+uint32_t g_vb_headers = 0, g_tex_headers = 0;  // 16 vertex buffer and 4 texture headers the draws point at
+uint32_t g_prim = 0;
+bool g_prog_loaded = false;  // a vertex program came in: the stream draws with it
+std::vector<uint32_t> g_indices;
+
+uint64_t Fnv(const void* p, size_t n, uint64_t h = 1469598103934665603ull) {
+    const uint8_t* b = static_cast<const uint8_t*>(p);
+    for (size_t i = 0; i < n; i++) h = (h ^ b[i]) * 1099511628211ull;
+    return h;
+}
+
+// an address the GPU reads: physical, or one of its CPU views
+uint32_t Guest(uint32_t a) { return mem::VirtualFromPhysical(a >= 0x80000000 ? a & 0x0FFFFFFF : a); }
+
+uint32_t Simple(uint32_t m) { return g_state.simple[m >> 2]; }
+
+// NV2A vertex array format (type in bits 0-3, components in 4-7) as a D3DVSDT
+uint32_t VsdType(uint32_t f) {
+    uint32_t type = f & 0xF, size = (f >> 4) & 0xF;
+    switch (type) {
+        case 0: return size == 4 ? 0x40 : (size << 4) | 0x4;  // D3DCOLOR, else bytes
+        case 1: return (size << 4) | 0x1;                       // NORMSHORT
+        case 2: return (size << 4) | 0x2;                       // FLOAT
+        case 4: return (size << 4) | 0x4;                       // PBYTE
+        case 5: return (size << 4) | 0x5;                       // SHORT
+        case 6: return 0x16;                                    // NORMPACKED3
+        default: return (size << 4) | 0x2;
+    }
+}
+
+std::shared_ptr<gpu::VertexShader> Program() {
+    static std::unordered_map<uint64_t, std::shared_ptr<gpu::VertexShader>> made;
+    std::vector<uint32_t> prog;
+    for (uint32_t i = Simple(0x1EA0) & 0xFF; i < 136; i++) {
+        prog.insert(prog.end(), g_prog + i * 4, g_prog + i * 4 + 4);
+        if (g_prog[i * 4 + 3] & 1) break;  // the last instruction
+    }
+    uint32_t formats[16];
+    for (int i = 0; i < 16; i++) formats[i] = Simple(0x1760 + i * 4);
+    uint64_t key = Fnv(formats, sizeof(formats), Fnv(prog.data(), prog.size() * 4));
+    auto& vs = made[key];
+    if (!vs) {
+        vs = std::make_shared<gpu::VertexShader>();
+        vs->handle = 0x40000001u + uint32_t(made.size()) * 2;
+        vs->program = std::move(prog);
+        vs->program_type = 0x2078;
+        for (int i = 0; i < 16; i++) {
+            if (!((formats[i] >> 4) & 0xF)) continue;
+            vs->inputs[size_t(i)] = {i, 0, VsdType(formats[i])};
+            vs->stream_stride[size_t(i)] = formats[i] >> 8;
+        }
+    }
+    return vs;
+}
+
+std::shared_ptr<gpu::PixelShader> Combiners() {
+    static std::unordered_map<uint64_t, std::shared_ptr<gpu::PixelShader>> made;
+    uint32_t d[0xF0 / 4] = {};
+    for (int i = 0; i < 8; i++) {
+        d[i] = Simple(0x260 + i * 4);
+        d[10 + i] = Simple(0xA60 + i * 4);
+        d[18 + i] = Simple(0xA80 + i * 4);
+        d[26 + i] = Simple(0xAA0 + i * 4);
+        d[34 + i] = Simple(0xAC0 + i * 4);
+        d[45 + i] = Simple(0x1E40 + i * 4);
+    }
+    d[8] = Simple(0x288);
+    d[9] = Simple(0x28C);
+    d[42] = Simple(0x17F8);
+    d[43] = Simple(0x1E20);
+    d[44] = Simple(0x1E24);
+    d[53] = Simple(0x1E60);
+    d[54] = Simple(0x1E6C);
+    d[55] = Simple(0x1E74);
+    d[56] = Simple(0x1E78);
+    auto& ps = made[Fnv(d, sizeof(d))];
+    if (!ps) {
+        ps = std::make_shared<gpu::PixelShader>();
+        ps->handle = 0x50000000u + uint32_t(made.size());
+        std::memcpy(ps->def, d, sizeof(d));
+    }
+    return ps;
+}
+
+// the arrays, textures, combiners and raster states the methods set, into the state a draw reads
+void Bind() {
+    if (!g_vb_headers) {
+        g_vb_headers = mem::AllocSystem(16 * 16);
+        g_tex_headers = mem::AllocSystem(4 * 32);
+    }
+    g_state.vs = Program();
+    g_state.vs_handle = g_state.vs->handle;
+    for (uint32_t i = 0; i < 16; i++) {
+        uint32_t f = Simple(0x1760 + i * 4), h = g_vb_headers + i * 16;
+        W32(h, 0x00000001);  // vertex buffer, one reference
+        W32(h + 4, Simple(0x1720 + i * 4) & 0x0FFFFFFF);
+        W32(h + 8, 0);
+        // an array the stream never set points nowhere: past physical memory it is left out
+        bool real = (f >> 4) & 0xF && (Simple(0x1720 + i * 4) & 0x0FFFFFFF) < mem::kPhysicalSize;
+        g_state.streams[i] = {real ? h : 0u, f >> 8};
+    }
+    for (uint32_t s = 0; s < 4; s++) {
+        uint32_t base = 0x1B00 + s * 0x40, c0 = Simple(base + 0xC);
+        g_state.palettes[s] = 0;
+        if (!(c0 & 0x40000000) || (Simple(base) & 0x0FFFFFFF) >= mem::kPhysicalSize) {
+            g_state.textures[s] = 0;
+            continue;
+        }
+        uint32_t h = g_tex_headers + s * 32, rect = Simple(base + 0x1C), pitch = Simple(base + 0x10) >> 16;
+        uint32_t w = rect >> 16, ht = rect & 0xFFFF;
+        W32(h, 0x00040001);  // texture, one reference
+        W32(h + 4, Simple(base) & 0x0FFFFFFF);
+        W32(h + 8, 0);
+        W32(h + 12, Simple(base + 4));
+        W32(h + 16, w && ht ? (w - 1) | (ht - 1) << 12 | (pitch >= 64 ? pitch / 64 - 1 : 0) << 24 : 0);
+        g_state.textures[s] = h;
+        auto& t = g_state.tss[s];
+        uint32_t addr = Simple(base + 8), filt = Simple(base + 0x14);
+        t[gpu::kTssAddressU] = addr & 0xF;
+        t[gpu::kTssAddressV] = (addr >> 8) & 0xF;
+        t[gpu::kTssAddressW] = (addr >> 16) & 0xF;
+        static const uint8_t kMin[8][2] = {{1, 0}, {1, 0}, {2, 0}, {1, 1}, {2, 1}, {1, 2}, {2, 2}, {2, 0}};
+        uint32_t min = (filt >> 16) & 7, mag = (filt >> 24) & 7;
+        t[gpu::kTssMinFilter] = kMin[min][0];
+        t[gpu::kTssMipFilter] = kMin[min][1];
+        t[gpu::kTssMagFilter] = mag == 1 ? 1 : 2;
+        t[gpu::kTssAlphaKill] = c0 & 4 ? 4 : 0;
+    }
+    g_state.ps = Combiners();
+    g_state.rs[gpu::kRsPsTextureModes] = Simple(0x1E6C);
+    // the complex states the renderer keeps as D3D values
+    g_state.rs[gpu::kRsZEnable] = Simple(0x30C);
+    g_state.rs[gpu::kRsStencilEnable] = Simple(0x32C);
+    g_state.rs[gpu::kRsStencilFail] = Simple(0x370);
+    g_state.rs[gpu::kRsFillMode] = Simple(0x38C) ? Simple(0x38C) : 0x1B02;
+    uint32_t cull = 0;
+    if (Simple(0x308)) {
+        bool cw_front = Simple(0x3A0) == 0x900, back = Simple(0x39C) != 0x404;
+        cull = (cw_front == back) ? 0x901 : 0x900;  // D3DCULL_CCW / D3DCULL_CW
+    }
+    g_state.rs[gpu::kRsCullMode] = cull;
+}
+
+void EndPrimitive() {
+    if (!g_prim || g_indices.empty()) {
+        g_prim = 0;
+        g_indices.clear();
+        return;
+    }
+    if (!g_prog_loaded) {
+        LOG_FIRST(4, "d3d: push buffer draw without a vertex program, skipped");
+    } else if (g_backend) {
+        SyncDeferred();
+        Bind();
+        uint32_t lo = *std::min_element(g_indices.begin(), g_indices.end());
+        uint32_t hi = *std::max_element(g_indices.begin(), g_indices.end());
+        if (hi - lo < 0x10000) {
+            static std::vector<uint16_t> idx;
+            idx.resize(g_indices.size());
+            for (size_t i = 0; i < g_indices.size(); i++) idx[i] = uint16_t(g_indices[i] - lo);
+            uint32_t base = g_state.base_vertex;
+            g_state.base_vertex = lo;
+            g_backend->Draw(g_state, g_prim, 0, uint32_t(idx.size()), reinterpret_cast<const uint8_t*>(idx.data()));
+            g_state.base_vertex = base;
+        } else {
+            LOG_FIRST(4, "d3d: push buffer draw over %u vertices skipped", hi - lo);
+        }
+    }
+    g_prim = 0;
+    g_indices.clear();
+}
+
+void Method(uint32_t m, uint32_t v) {
+    float f;
+    std::memcpy(&f, &v, 4);
+    if (m == 0x17FC) {  // begin/end
+        if (v) {
+            g_prim = v;
+            g_indices.clear();
+        } else {
+            EndPrimitive();
+        }
+    } else if (m == 0x1800) {  // two 16 bit indices
+        g_indices.push_back(v & 0xFFFF);
+        g_indices.push_back(v >> 16);
+    } else if (m == 0x1808) {
+        g_indices.push_back(v);
+    } else if (m == 0x1810) {  // first vertex, count - 1 in the top byte
+        for (uint32_t i = 0, first = v & 0xFFFFFF, n = (v >> 24) + 1; i < n; i++) g_indices.push_back(first + i);
+    } else if (m == 0x1818) {
+        LOG_FIRST(4, "d3d: push buffer inline array not drawn");
+    } else if (m >= 0x0B00 && m < 0x0B80) {  // vertex program, 4 dwords an instruction
+        if (g_prog_load < 136) g_prog[g_prog_load * 4 + g_prog_comp] = v;
+        g_prog_loaded = true;
+        if (++g_prog_comp == 4) g_prog_comp = 0, g_prog_load++;
+    } else if (m >= 0x0B80 && m < 0x0C00) {  // constants, 4 floats a register
+        if (g_const_load < 192) g_state.vsc[g_const_load][g_const_comp] = f;
+        if (++g_const_comp == 4) g_const_comp = 0, g_const_load++;
+    } else {
+        if (m == 0x1E9C) g_prog_load = v, g_prog_comp = 0;
+        if (m == 0x1EA4) g_const_load = v, g_const_comp = 0;
+        ApplyVisibilityMethod(m, v);
+        g_state.simple[m >> 2] = v;
+    }
+}
+
+// from p until the stream comes back to end, following the jumps, calls and returns the fixups and the buffer hold
+void Run(uint32_t p, uint32_t end) {
+    uint32_t ret = 0;
+    for (int guard = 1 << 22; guard > 0 && p != end; guard--) {
+        uint32_t head = R32(p);
+        p += 4;
+        if ((head & 3) == 1) {  // jump, old form: address | 1
+            p = Guest(head & ~3u);
+            continue;
+        }
+        if ((head & 0xE0000003) == 0x20000000) {  // jump
+            p = Guest(head & 0x1FFFFFFC);
+            continue;
+        }
+        if ((head & 3) == 2) {  // call
+            ret = p;
+            p = Guest(head & ~3u);
+            continue;
+        }
+        if (head == 0x00020000) {  // return
+            if (!ret) break;
+            p = ret;
+            ret = 0;
+            continue;
+        }
+        if (head & 0xA0030003) {
+            LOG_FIRST(8, "d3d: push buffer stops at command %08X", head);
+            break;
+        }
+        uint32_t method = head & 0x1FFC, n = (head >> 18) & 0x7FF;
+        bool same = head & 0x40000000;
+        for (uint32_t i = 0; i < n; i++, p += 4) Method(same ? method : method + i * 4, R32(p));
+    }
+}
+
+// fixups: size, offset into the buffer, then size bytes copied there, until a size of -1
+void ApplyFixups(uint32_t fixup, uint32_t buffer) {
+    uint32_t data = Guest(R32(fixup + 4)), p = data + R32(fixup + 12), end = data + R32(fixup + 16);
+    while (p + 8 <= end) {
+        uint32_t size = R32(p), offset = R32(p + 4);
+        if (size == 0xFFFFFFFF) break;
+        std::memcpy(HostPtr(buffer + offset), HostPtr(p + 8), size);
+        p += 8 + ((size + 3) & ~3u);
+    }
+}
+}  // namespace pb
+}  // namespace
+
+HLE_STDCALL(D3DDevice_RunPushBuffer, 2) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));
+    uint32_t buf = a[0], fixup = a[1];
+    if (!buf) return 0;
+    uint32_t data = pb::Guest(R32(buf + 4)), size = R32(buf + 12);
+    if (fixup) pb::ApplyFixups(fixup, data);
+    // what the title had bound stays bound for its own draws after this
+    auto vs = g_state.vs;
+    auto ps = g_state.ps;
+    uint32_t vs_handle = g_state.vs_handle;
+    auto textures = g_state.textures;
+    auto palettes = g_state.palettes;
+    auto streams = g_state.streams;
+    auto tss = g_state.tss;
+    pb::Run(data, data + size);
+    g_state.vs = vs;
+    g_state.ps = ps;
+    g_state.vs_handle = vs_handle;
+    g_state.textures = textures;
+    g_state.palettes = palettes;
+    g_state.streams = streams;
+    g_state.tss = tss;
+    return 0;
 }
 
 // frame buffer compression tiles are the console's memory controller's business

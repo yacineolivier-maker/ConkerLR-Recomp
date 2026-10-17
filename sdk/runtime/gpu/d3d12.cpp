@@ -2248,7 +2248,7 @@ void D3D12Backend::CaptureDraw(const State& s, uint32_t prim, uint32_t count, co
 
 // small draws: their inputs and constants; then ends the draw's line
 void D3D12Backend::EndDrawCapture(const State& s, const Assembled& a, uint32_t count, const DrawConstants& c) {
-    if (count <= kQuadVertices) CaptureInputs(s, a, c);
+    if (count <= kQuadVertices || ((s.vs_handle & 0xF0000000) == 0x40000000 && cap_i_ < 80)) CaptureInputs(s, a, c);
     fputc('\n', cap_);
 }
 

@@ -14,6 +14,14 @@
 #include "xdk/layout.h"
 
 // configs written before the SDK knew the name
+#ifndef SYM_IDirectSoundBuffer_GetVoiceProperties
+#define SYM_IDirectSoundBuffer_GetVoiceProperties FFFFFD17
+#define HAS_IDirectSoundBuffer_GetVoiceProperties 0
+#endif
+#ifndef SYM_IDirectSoundStream_GetVoiceProperties
+#define SYM_IDirectSoundStream_GetVoiceProperties FFFFFD18
+#define HAS_IDirectSoundStream_GetVoiceProperties 0
+#endif
 #ifndef SYM_IDirectSound_CreateSoundStream
 #define SYM_IDirectSound_CreateSoundStream FFFFFD10
 #define HAS_IDirectSound_CreateSoundStream 0
@@ -820,6 +828,39 @@ HLE_STDCALL(IDirectSoundBuffer_SetPitch, 2) {
 HLE_STDCALL(IDirectSoundStream_SetPitch, 2) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     if (Voice* v = FindStream(a[0])) v->freq = PitchToFrequency(int32_t(a[1]));
+    return 0;
+}
+// GetVoiceProperties(this, DSVOICEPROPS): mix bin count, eight (bin, volume) pairs, pitch, two I3DL2 volumes
+static void VoiceProperties(const Voice& v, uint32_t out) {
+    std::memset(HostPtr(out), 0, 4 + 8 * 8 + 12);
+    uint32_t n = std::min<uint32_t>(v.nbins, 8);
+    W32(out, n);
+    for (uint32_t i = 0; i < n; i++) {
+        W32(out + 4 + i * 8, v.bin[i]);
+        W32(out + 8 + i * 8, uint32_t(v.bin_mb[v.bin[i] & 31]));
+    }
+    uint32_t f = v.freq ? v.freq : v.rate;
+    W32(out + 4 + 64, uint32_t(int32_t(std::lround(std::log2(double(f ? f : 48000) / 48000.0) * 4096.0))));
+}
+HLE_STDCALL(IDirectSoundBuffer_GetVoiceProperties, 2) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Voice* v = Find(a[0]);
+    if (!v) v = a[0] ? Find(a[0] - 0x1C) : nullptr;
+    if (!v) {
+        std::memset(HostPtr(a[1]), 0, 4);
+        return 0x80004005u;
+    }
+    VoiceProperties(*v, a[1]);
+    return 0;
+}
+HLE_STDCALL(IDirectSoundStream_GetVoiceProperties, 2) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Voice* v = FindStream(a[0]);
+    if (!v) {
+        std::memset(HostPtr(a[1]), 0, 4);
+        return 0x80004005u;
+    }
+    VoiceProperties(*v, a[1]);
     return 0;
 }
 // low frequency oscillators and envelopes are not played

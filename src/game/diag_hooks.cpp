@@ -12,3 +12,10 @@ void LogXmvFrame(X86Context& ctx, uint8_t* base) {
              kernel::R32(0x779BA0 + 4 * kernel::R32(0x779B9C)));
 }
 
+
+// après l'écriture du terminateur de correctifs (0x3F35D5 -> 0x3F35DB) : ecx = adresse visée
+void LogFixupEnd(X86Context& ctx, uint8_t* base) {
+    (void)base;
+    static int n = 0;
+    if (n++ < 6) LOGI("fixup: fin écrite à %08X -> %08X (fixup courant %08X)", ctx.ecx, kernel::R32(ctx.ecx), kernel::R32(0x54A8B0));
+}

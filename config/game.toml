@@ -101,6 +101,7 @@ D3DDevice_LightEnable                                = 0
 D3DDevice_LoadVertexShader                           = 0
 D3DDevice_MakeSpace                                  = 0
 D3DDevice_PersistDisplay                             = 0x53A0E0
+D3DDevice_RunPushBuffer                              = 0x53AE30  # trouvé à la main (pushbuffer + fixups, ret 8)
 D3DDevice_Reset                                      = 0x538D50  # trouvé à la main (appelé par 0x2A79BA)
 D3DDevice_Release                                    = 0
 D3DDevice_SelectVertexShader                         = 0x536210
@@ -227,6 +228,8 @@ IDirectSoundBuffer_SetPitch                          = 0x4C503C  # .XTLID 0xB007
 IDirectSoundBuffer_SetLFO                            = 0x4C5058  # .XTLID 0xB006D
 IDirectSoundBuffer_SetEG                             = 0x4C5074  # .XTLID 0xB0067
 IDirectSoundStream_SetPitch                          = 0x4C51F5  # .XTLID 0xB0099
+IDirectSoundBuffer_GetVoiceProperties                = 0x4C519C  # .XTLID 0xB0055 (XACT 0x54E704 : DSVOICEPROPS)
+IDirectSoundStream_GetVoiceProperties                = 0x4C5230  # .XTLID 0xB0081 (XACT 0x54E70F)
 IDirectSoundStream_SetOutputBuffer                   = 0x4C5A03  # .XTLID 0xB0098
 IDirectSoundStream_SetLFO                            = 0x4C51FA  # .XTLID 0xB0092
 IDirectSoundStream_SetEG                             = 0x4C51FF
@@ -313,3 +316,7 @@ Direct3D_CreateDevice = ["none", "none", "none", "eax", "stack", "ecx"]  # reads
 [[hook]]
 at = 0x252F9A
 call = "MarkVideoFrame"  # src/game/video.cpp
+
+[[hook]]
+at = 0x3F35DB
+call = "LogFixupEnd"

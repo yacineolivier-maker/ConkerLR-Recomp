@@ -23,6 +23,8 @@ static std::recursive_mutex g_lock;
 uint8_t* Base() { return g_base; }
 
 // physical memory shows at 0x80000000 and again at 0xF0000000 (write combined view)
+static uint32_t g_image_lo = 0, g_image_hi = 0;  // the image, by its virtual = physical addresses
+
 static bool InPhysical(uint32_t va) {
     return (va >= kContiguousBase && va < kContiguousBase + kPhysicalSize) ||
            (va >= kWriteCombineBase && va < kWriteCombineBase + kPhysicalSize);
@@ -236,6 +238,9 @@ void ReserveImage(uint32_t base, uint32_t size) {
     uint32_t b = base & ~0xFFFFu;
     uint32_t e = (base + size + 0xFFFF) & ~0xFFFFu;
     g_user.Remove(b, e - b);
+    // physical addresses in the image's range not given out as contiguous memory mean the image (VirtualFromPhysical)
+    g_image_lo = b;
+    g_image_hi = e;
     Reservation r{e - b, 4, std::vector<uint8_t>((e - b) / kPage, 1)};  // 4 is PAGE_READWRITE
     g_reserved[b] = std::move(r);
     Commit(b, e - b);
@@ -419,6 +424,12 @@ uint32_t PhysicalFromVirtual(uint32_t va) {
 }
 
 uint32_t VirtualFromPhysical(uint32_t pa) {
+    // the image's own pages: PhysicalFromVirtual gives a title its virtual address as their physical one (a static
+    // buffer handed to the GPU, as Conker's push buffer fixups are), so they come back to the image
+    if (pa >= g_image_lo && pa < g_image_hi) {
+        std::lock_guard<std::recursive_mutex> lock(g_lock);
+        if (pa < kKernelDataSize || g_contig.IsFree(kContiguousBase | (pa & ~(kPage - 1)), kPage)) return pa;
+    }
     if (pa < kPhysicalSize) return kContiguousBase | pa;
     return pa;
 }
