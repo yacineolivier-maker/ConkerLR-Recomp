@@ -205,6 +205,22 @@ void UpdateViewportConstants() {
 void SetComplex(uint32_t rs, uint32_t v) {
     g_state.rs[rs] = v;
     W32(kRenderState + rs * 4, v);
+    // the hardware methods the XDK pushes for them, which push buffers run with
+    auto& m = g_state.simple;
+    switch (rs) {
+        case gpu::kRsZEnable: m[0x30C >> 2] = v != 0; break;
+        case gpu::kRsStencilEnable: m[0x32C >> 2] = v != 0; break;
+        case gpu::kRsStencilFail: m[0x370 >> 2] = v; break;
+        case gpu::kRsFillMode: m[0x38C >> 2] = v; m[0x390 >> 2] = v; break;
+        case gpu::kRsCullMode:  // D3DCULL_CW culls clockwise faces: counter clockwise is the front, the back is culled
+            m[0x308 >> 2] = v != 0;
+            if (v) {
+                m[0x39C >> 2] = 0x405;
+                m[0x3A0 >> 2] = v == 0x900 ? 0x901 : 0x900;
+            }
+            break;
+        default: break;
+    }
 }
 
 // The library's default render and texture stage states; its pushes land in the scratch buffer
