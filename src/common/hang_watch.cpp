@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <thread>
+#include <vector>
 
 #include "core/log.h"
 #include "gpu/backend.h"
@@ -12,11 +13,20 @@ namespace game {
 
 void StartHangWatch() {
     // XBE_CAPTURE_AT=<secondes> (avec XBE_CAPTURE_DIR) : capture d'une image complète, comme F3
+    // XBE_CAPTURE_AT=<s>[,<s>...] : plusieurs captures dans la même exécution
     if (const char* c = std::getenv("XBE_CAPTURE_AT")) {
-        int at = std::atoi(c);
+        std::vector<int> at;
+        for (const char* p = c; *p;) {
+            at.push_back(std::atoi(p));
+            while (*p && *p != ',') p++;
+            if (*p == ',') p++;
+        }
         std::thread([at] {
-            std::this_thread::sleep_for(std::chrono::seconds(at));
-            gpu::g_capture = true;
+            auto start = std::chrono::steady_clock::now();
+            for (int t : at) {
+                std::this_thread::sleep_until(start + std::chrono::seconds(t));
+                gpu::g_capture = true;
+            }
         }).detach();
     }
     const char* v = std::getenv("XBE_HANG");
