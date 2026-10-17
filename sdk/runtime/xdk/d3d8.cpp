@@ -1082,6 +1082,8 @@ uint32_t g_push_begin = 0;
 namespace {
 namespace pb {
 void Method(uint32_t m, uint32_t v);
+// the bound program read with the packed vertices of an inline array, laid out by the pushed array formats
+std::shared_ptr<gpu::VertexShader> InlineLayout(const std::shared_ptr<gpu::VertexShader>& program, uint32_t& stride);
 }  // namespace pb
 }  // namespace
 
@@ -1168,6 +1170,13 @@ void Walk(uint32_t end) {
                 } else if (!g_inline.empty()) {
                     // vertices the title pushed whole (BeginPush with its EndPush inlined, link time code generation)
                     uint32_t stride = VertexBytes(), bytes = uint32_t(g_inline.size()) * 4;
+                    auto bound = g_state.vs;
+                    uint32_t bound_handle = g_state.vs_handle, packed = 0;
+                    if (auto layout = pb::InlineLayout(bound_handle & 1 ? bound : nullptr, packed); layout && packed) {
+                        g_state.vs = layout;
+                        g_state.vs_handle = layout->handle;
+                        stride = packed;
+                    }
                     if (g_im_prim && stride && bytes % stride == 0) {
                         LOG_FIRST(400, "d3d: pushed primitive %u drawn, %u vertices of %u bytes, vs %08X, t0 %08X", g_im_prim, bytes / stride,
                                   stride, g_state.vs_handle, g_state.textures[0]);
@@ -1175,6 +1184,8 @@ void Walk(uint32_t end) {
                     }
                     else LOG_FIRST(200, "d3d: pushed primitive %u dropped, %u bytes of vertices of %u (walk %08X, %08X %08X %08X)", g_im_prim, bytes,
                                   stride, p, g_inline[0], g_inline.size() > 1 ? g_inline[1] : 0, g_inline.size() > 2 ? g_inline[2] : 0);
+                    g_state.vs = bound;
+                    g_state.vs_handle = bound_handle;
                     g_inline.clear();
                     g_im_prim = 0;
                 } else {
@@ -1284,6 +1295,7 @@ uint32_t g_vb_headers = 0, g_tex_headers = 0, g_pal_headers = 0;  // 16 vertex b
 uint32_t g_prim = 0;
 bool g_prog_loaded = false;  // a vertex program came in: the stream draws with it
 std::vector<uint32_t> g_indices;
+std::vector<uint32_t> g_inline_pb;  // an inline array's dwords between begin and end
 
 uint64_t Fnv(const void* p, size_t n, uint64_t h = 1469598103934665603ull) {
     const uint8_t* b = static_cast<const uint8_t*>(p);
@@ -1308,6 +1320,43 @@ uint32_t VsdType(uint32_t f) {
         case 6: return 0x16;                                    // NORMPACKED3
         default: return (size << 4) | 0x2;
     }
+}
+
+uint32_t FormatBytes(uint32_t f) {
+    uint32_t type = f & 0xF, size = (f >> 4) & 0xF;
+    static const uint8_t kComponent[8] = {1, 2, 4, 0, 1, 2, 4, 0};  // UB_D3D S1 F - UB_OGL S32K CMP -
+    return type == 6 ? 4 : size * kComponent[type & 7];
+}
+
+std::shared_ptr<gpu::VertexShader> InlineLayout(const std::shared_ptr<gpu::VertexShader>& program, uint32_t& stride) {
+    static std::map<std::pair<const gpu::VertexShader*, uint64_t>, std::shared_ptr<gpu::VertexShader>> made;
+    uint32_t formats[16];
+    stride = 0;
+    for (int i = 0; i < 16; i++) {
+        formats[i] = Simple(0x1760 + i * 4);
+        if ((formats[i] >> 4) & 0xF) stride += FormatBytes(formats[i]);
+    }
+    if (!stride) return nullptr;
+    auto& vs = made[{program.get(), Fnv(formats, sizeof(formats))}];
+    if (!vs) {
+        vs = std::make_shared<gpu::VertexShader>();
+        if (program) {
+            vs->program = program->program;
+            vs->program_type = program->program_type;
+            vs->handle = program->handle;  // the backend keeps its cached translation by object
+        } else {
+            vs->handle = 0x48000001u + uint32_t(made.size()) * 2;
+        }
+        vs->handle |= 1;
+        uint32_t off = 0;
+        for (int i = 0; i < 16; i++) {
+            if (!((formats[i] >> 4) & 0xF)) continue;
+            vs->inputs[size_t(i)] = {0, off, VsdType(formats[i])};
+            off += FormatBytes(formats[i]);
+        }
+        vs->stream_stride[0] = off;
+    }
+    return vs;
 }
 
 std::shared_ptr<gpu::VertexShader> Program() {
@@ -1434,6 +1483,16 @@ void Bind() {
 }
 
 void EndPrimitive() {
+    if (g_prim && !g_inline_pb.empty() && g_prog_loaded && g_backend) {
+        SyncDeferred();
+        Bind();
+        uint32_t stride = 0;
+        if (auto layout = InlineLayout(g_state.vs, stride); layout && stride && (g_inline_pb.size() * 4) % stride == 0) {
+            g_state.vs = layout;
+            DrawUp(g_prim, uint32_t(g_inline_pb.size() * 4 / stride), g_inline_pb.data(), stride);
+        }
+    }
+    g_inline_pb.clear();
     if (!g_prim || g_indices.empty()) {
         g_prim = 0;
         g_indices.clear();
@@ -1471,6 +1530,7 @@ void Method(uint32_t m, uint32_t v) {
         if (v) {
             g_prim = v;
             g_indices.clear();
+            g_inline_pb.clear();
         } else {
             EndPrimitive();
         }
@@ -1482,7 +1542,7 @@ void Method(uint32_t m, uint32_t v) {
     } else if (m == 0x1810) {  // first vertex, count - 1 in the top byte
         for (uint32_t i = 0, first = v & 0xFFFFFF, n = (v >> 24) + 1; i < n; i++) g_indices.push_back(first + i);
     } else if (m == 0x1818) {
-        LOG_FIRST(4, "d3d: push buffer inline array not drawn");
+        g_inline_pb.push_back(v);
     } else if (m >= 0x0B00 && m < 0x0B80) {  // vertex program, 4 dwords an instruction
         if (g_prog_load < 136) g_prog[g_prog_load * 4 + g_prog_comp] = v;
         g_prog_loaded = true;
