@@ -669,6 +669,8 @@ KERNEL_EXPORT(158, KeWaitForMultipleObjects, 8) {
 
 KERNEL_EXPORT(145, KeSetEvent, 3) { return uint32_t(SetEvent(*FromPointer(a[0]))); }
 
+bool IsFileHandle(uint32_t h);  // files.cpp
+
 KERNEL_EXPORT(246, ObReferenceObjectByHandle, 3) {
     uint32_t h = a[0];
     ObjectRef o = h == 0xFFFFFFFE ? CurrentRef() : FromHandle(h);
@@ -676,6 +678,13 @@ KERNEL_EXPORT(246, ObReferenceObjectByHandle, 3) {
     if (!o->guest) {
         uint32_t body = mem::AllocSystem(32);
         Bind(o, body);
+        // a file object: XAPI reads its DeviceObject (+8), whose first byte holds flags and +0x1C the FATX
+        // cluster size, so it gets one; file objects are never looked up by pointer, so the stamp may go
+        if (IsFileHandle(h)) {
+            uint32_t device = mem::AllocSystem(0x40);
+            W32(device + 0x1C, 0x4000);
+            W32(body + 8, device);
+        }
     }
     W32(a[2], o->guest);
     return kSuccess;

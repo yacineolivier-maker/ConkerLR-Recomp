@@ -11,7 +11,16 @@ code_sections = [".text", "D3DX", "XNET", "XONLINE", "DSOUND", "XMV", "WMADEC", 
 
 # extra entry points
 [functions]
-0x498D00 = ""  # appel indirect (log)
+0x4C5D4C = ""  # cible du jmp 0x4C606D
+0x4C4B7D = ""  # méthode CDirectSoundStream atteinte par jmp depuis son wrapper
+0x4C4BCB = ""  # méthode CDirectSoundStream atteinte par jmp depuis son wrapper
+0x4C4EA3 = ""  # méthode CDirectSoundStream atteinte par jmp depuis son wrapper
+0x4C4EF5 = ""  # méthode CDirectSoundStream atteinte par jmp depuis son wrapper
+0x4C4F47 = ""  # méthode CDirectSoundStream atteinte par jmp depuis son wrapper
+0x4C4C65 = ""  # méthode CDirectSoundStream atteinte par jmp depuis son wrapper
+0x4C4D09 = ""  # méthode CDirectSoundStream atteinte par jmp depuis son wrapper
+0x4C4D5B = ""  # méthode CDirectSoundStream atteinte par jmp depuis son wrapper
+0x4C5907 = ""  # méthode CDirectSoundStream atteinte par jmp depuis son wrapper
 
 # functions the host replaces or calls by name, 0 where the image has none
 [symbols]
@@ -35,7 +44,7 @@ CDirectSoundStream_Process                           = 0x4C44E1
 CDirectSoundStream_Release                           = 0x4C4343
 CDirectSoundStream_SetFilter                         = 0x4C4DAD
 CDirectSoundStream_SetFormat                         = 0x4C5FDA
-CDirectSoundStream_SetFrequency                      = 0
+CDirectSoundStream_SetFrequency                      = 0x4C4C19  # wrapper 0x4C51D4, ordre XDK SetFrequency/SetVolume/SetPitch
 CDirectSoundStream_SetHeadroom                       = 0x4C4DFF
 CDirectSoundStream_SetI3DL2Source                    = 0
 CDirectSoundStream_SetMaxDistance                    = 0
@@ -59,7 +68,7 @@ crt_sqrt                                             = 0
 crt_tan                                              = 0
 D3D_BlockOnResource                                  = 0
 D3D_BlockOnTime                                      = 0x53C190
-D3D_InitDefaultState                                 = 0
+D3D_InitDefaultState                                 = 0x53E3F0  # trouvé à la main : identités, états par défaut, COLOROP[0]=4
 D3D_InternalAddRef                                   = 0
 D3D_InternalRelease                                  = 0x53B7D0
 D3D_KickOffAndWaitForIdle                            = 0
@@ -77,7 +86,7 @@ D3DDevice_DeletePixelShader                          = 0
 D3DDevice_DeleteVertexShader                         = 0
 D3DDevice_DrawIndexedVertices                        = 0x53AA00
 D3DDevice_DrawVertices                               = 0x53A930
-D3DDevice_DrawVerticesUP                             = 0
+D3DDevice_DrawVerticesUP                             = 0x53A600  # trouvé à la main : push 0x417FC, ret 0x10
 D3DDevice_EnableOverlay                              = 0
 D3DDevice_End                                        = 0
 D3DDevice_EndPush                                    = 0
@@ -163,7 +172,7 @@ DirectSoundCreate                                    = 0x4C69A3
 DirectSoundCreateBuffer                              = 0
 DirectSoundCreateStream                              = 0x4C69EA
 DirectSoundDoWork                                    = 0x4C5248
-DirectSoundUseFullHRTF                               = 0x4C3976
+DirectSoundUseFullHRTF                               = 0  # code d origine conservé (0x4C3976) : il installe la table de calcul HRTF [0x4E1D2C] que XACT appelle
 DirectSoundUseLightHRTF                              = 0
 getsockname                                          = 0
 getsockopt                                           = 0
@@ -196,7 +205,7 @@ IDirectSoundBuffer_SetBufferData                     = 0x4C6048
 IDirectSoundBuffer_SetCurrentPosition                = 0x4C5180
 IDirectSoundBuffer_SetFilter                         = 0x4C5090
 IDirectSoundBuffer_SetFormat                         = 0x4C602C
-IDirectSoundBuffer_SetFrequency                      = 0
+IDirectSoundBuffer_SetFrequency                      = 0x4C523A  # jmp 0x4C4F47 -> setter de voix 0x4C3F2F(this+4, f), appelé par XACT (buffer, 0)
 IDirectSoundBuffer_SetHeadroom                       = 0x4C50AC
 IDirectSoundBuffer_SetI3DL2Source                    = 0
 IDirectSoundBuffer_SetLoopRegion                     = 0x4C5144
@@ -213,6 +222,13 @@ IDirectSoundBuffer_SetVolume                         = 0x4C5020
 IDirectSoundBuffer_Stop                              = 0x4C5108
 IDirectSoundBuffer_StopEx                            = 0x4C5120
 IDirectSoundBuffer_Unlock                            = 0
+IDirectSound_CreateSoundStream                       = 0x4C67B9  # .XTLID 0xB003B (ids dans l ordre alphabétique des exports)
+IDirectSoundBuffer_SetPitch                          = 0x4C503C  # .XTLID 0xB0076
+IDirectSoundBuffer_SetLFO                            = 0x4C5058  # .XTLID 0xB006D
+IDirectSoundBuffer_SetEG                             = 0x4C5074  # .XTLID 0xB0067
+IDirectSoundStream_SetPitch                          = 0x4C51F5  # .XTLID 0xB0099
+IDirectSoundStream_SetOutputBuffer                   = 0x4C5A03  # .XTLID 0xB0098
+IDirectSoundStream_SetLFO                            = 0x4C51FA  # .XTLID 0xB0092
 IDirectSoundStream_SetEG                             = 0x4C51FF
 ioctlsocket                                          = 0x48D736
 listen                                               = 0
@@ -258,6 +274,7 @@ XOnlineStartup                                       = 0x4A0A8E
 [data]
 D3D_DeferredTextureState    = 0x547330  # TexCoordIndex écrit [stage*0x80 + 28*4] à 0x5473A0
 D3D_Device                  = 0x547540
+D3D_FvfShader               = 0x547040  # init d origine 0x53EDE1 : mov [dev+0x794], 0x547040
 D3D_DirtyFlags              = 0x5499F0  # SelectVertexShader / SetPixelShader : or [0x5499F0]
 D3D_IndexData               = 0x54A898  # SetIndices y range pIndexData->Data
 D3D_pDevice                 = 0x5499E8

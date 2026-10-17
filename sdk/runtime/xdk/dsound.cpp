@@ -13,6 +13,36 @@
 #include "xdk/hle.h"
 #include "xdk/layout.h"
 
+// configs written before the SDK knew the name
+#ifndef SYM_IDirectSound_CreateSoundStream
+#define SYM_IDirectSound_CreateSoundStream FFFFFD10
+#define HAS_IDirectSound_CreateSoundStream 0
+#endif
+#ifndef SYM_IDirectSoundBuffer_SetPitch
+#define SYM_IDirectSoundBuffer_SetPitch FFFFFD11
+#define HAS_IDirectSoundBuffer_SetPitch 0
+#endif
+#ifndef SYM_IDirectSoundStream_SetPitch
+#define SYM_IDirectSoundStream_SetPitch FFFFFD12
+#define HAS_IDirectSoundStream_SetPitch 0
+#endif
+#ifndef SYM_IDirectSoundBuffer_SetLFO
+#define SYM_IDirectSoundBuffer_SetLFO FFFFFD13
+#define HAS_IDirectSoundBuffer_SetLFO 0
+#endif
+#ifndef SYM_IDirectSoundBuffer_SetEG
+#define SYM_IDirectSoundBuffer_SetEG FFFFFD14
+#define HAS_IDirectSoundBuffer_SetEG 0
+#endif
+#ifndef SYM_IDirectSoundStream_SetOutputBuffer
+#define SYM_IDirectSoundStream_SetOutputBuffer FFFFFD16
+#define HAS_IDirectSoundStream_SetOutputBuffer 0
+#endif
+#ifndef SYM_IDirectSoundStream_SetLFO
+#define SYM_IDirectSoundStream_SetLFO FFFFFD15
+#define HAS_IDirectSoundStream_SetLFO 0
+#endif
+
 using namespace kernel;
 
 namespace kernel {
@@ -739,12 +769,10 @@ BUFFER(SetFormat, 2) {
 
 // streams, the object carries the XDK's own vtable
 
-HLE_STDCALL(DirectSoundCreateStream, 2) {
-    XDK_REQUIRE("dsound", XDK_KEY(CDirectSoundStream_Vtable), XDK_KEY(CDirectSoundStream_Vtable2),
-                XDK_DATA(DSound_StreamVtable), XDK_DATA(DSound_StreamVtable2));
+// a stream from its description, written to out; DirectSoundCreateStream and IDirectSound_CreateSoundStream
+static uint32_t NewStream(uint32_t desc, uint32_t out) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Start();
-    uint32_t desc = a[0];
     uint32_t obj = mem::AllocSystem(0x80);
     std::memset(HostPtr(obj), 0, 0x80);
     W32(obj + XDK_CDirectSoundStream_Vtable, kStreamVtable);
@@ -760,9 +788,46 @@ HLE_STDCALL(DirectSoundCreateStream, 2) {
     SetBins(v, R32(desc + 20));
     v.is3d = flags & 0x10;  // DSBCAPS_CTRL3D
     v.headroom = DefaultHeadroom(flags);
-    W32(a[1], obj);
+    W32(out, obj);
     return 0;
 }
+
+HLE_STDCALL(DirectSoundCreateStream, 2) {
+    XDK_REQUIRE("dsound", XDK_KEY(CDirectSoundStream_Vtable), XDK_KEY(CDirectSoundStream_Vtable2),
+                XDK_DATA(DSound_StreamVtable), XDK_DATA(DSound_StreamVtable2));
+    return NewStream(a[0], a[1]);
+}
+// (this, description, stream out, outer unknown)
+HLE_STDCALL(IDirectSound_CreateSoundStream, 4) {
+    XDK_REQUIRE("dsound", XDK_KEY(CDirectSoundStream_Vtable), XDK_KEY(CDirectSoundStream_Vtable2),
+                XDK_DATA(DSound_StreamVtable), XDK_DATA(DSound_StreamVtable2));
+    return NewStream(a[1], a[2]);
+}
+
+// pitch: octaves in 1/4096, relative to 48 kHz
+static uint32_t PitchToFrequency(int32_t pitch) { return uint32_t(48000.0 * std::exp2(double(pitch) / 4096.0) + 0.5); }
+// an IDirectSoundStream wrapper's pointer: the stream, or its interface 0x1C into it as the library lays it out
+static Voice* FindStream(uint32_t p) {
+    Voice* v = Find(p);
+    return v ? v : p ? Find(p - 0x1C) : nullptr;
+}
+// the library's own versions write voice registers a host voice does not have
+HLE_STDCALL(IDirectSoundBuffer_SetPitch, 2) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    if (Voice* v = Find(a[0])) v->freq = PitchToFrequency(int32_t(a[1]));
+    return 0;
+}
+HLE_STDCALL(IDirectSoundStream_SetPitch, 2) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    if (Voice* v = FindStream(a[0])) v->freq = PitchToFrequency(int32_t(a[1]));
+    return 0;
+}
+// low frequency oscillators and envelopes are not played
+HLE_STDCALL(IDirectSoundBuffer_SetLFO, 2) { return 0; }
+HLE_STDCALL(IDirectSoundBuffer_SetEG, 2) { return 0; }
+HLE_STDCALL(IDirectSoundStream_SetLFO, 2) { return 0; }
+// a stream sent into another buffer (a submix) plays to the mix bins it has instead
+HLE_STDCALL(IDirectSoundStream_SetOutputBuffer, 2) { return 0; }
 
 #define STREAM(name, nargs)                                     \
     static uint32_t str_##name(Voice& v, const Args& a);        \

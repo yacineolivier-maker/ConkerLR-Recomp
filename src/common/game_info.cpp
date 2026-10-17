@@ -1,5 +1,10 @@
 #include "app/app.h"
 
+namespace game {
+void StartHangWatch();  // hang_watch.cpp
+void StartApu();        // apu.cpp
+}
+
 // what the runtime asks of the game; strings must be set, hooks may stay null
 const app::GameInfo app::kGame = {
     .title = L"Conker: Live & Reloaded",
@@ -14,8 +19,8 @@ const app::GameInfo app::kGame = {
     .options = {},
     .load = nullptr,
     .save = nullptr,
-    .init = nullptr,
-    .loaded = nullptr,
+    .init = game::StartHangWatch,
+    .loaded = game::StartApu,
     .window = nullptr,
     .message = nullptr,
     .ui = nullptr,

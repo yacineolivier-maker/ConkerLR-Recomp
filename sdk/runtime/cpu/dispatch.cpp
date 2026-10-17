@@ -12,6 +12,13 @@
 
 #ifdef _WIN32
 #include <intrin.h>
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #else
 #include <x86intrin.h>
 #endif
@@ -180,8 +187,21 @@ void LogGuestStack(X86Context& ctx, int words) {
 }
 }  // namespace kernel
 
+// host frames as image-relative addresses, for llvm-symbolizer: the recompiled functions on the way here
+static void LogHostStack() {
+#ifdef _WIN32
+    void* frames[32];
+    USHORT n = RtlCaptureStackBackTrace(1, 32, frames, nullptr);
+    uintptr_t mod = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    char line[32 * 12 + 16] = {}, *p = line;
+    for (USHORT i = 0; i < n; i++) p += std::snprintf(p, 12, " %llX", (unsigned long long)(reinterpret_cast<uintptr_t>(frames[i]) - mod));
+    LOGE("  host stack rva%s", line);
+#endif
+}
+
 void x86_trap(X86Context& ctx, uint32_t va, const char* what) {
     LOGE("guest trap at %08X: %s", va, what);
+    LogHostStack();
     kernel::LogGuestStack(ctx, 64);
     logx::Flush();
 #ifdef _WIN32

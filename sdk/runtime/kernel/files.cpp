@@ -171,6 +171,9 @@ void Complete(uint32_t event, uint32_t apc, uint32_t apc_ctx, uint32_t iosb) {
 
 }  // namespace
 
+// for the object manager, which gives file objects a device object
+bool IsFileHandle(uint32_t h) { return FileFromHandle(h) != nullptr; }
+
 std::string ReadAnsiString(uint32_t str) {
     if (!str) return {};
     uint16_t len = R16(str);
@@ -587,8 +590,8 @@ KERNEL_EXPORT(226, NtSetInformationFile, 5) {
     return kSuccess;
 }
 
-KERNEL_EXPORT(218, NtQueryVolumeInformationFile, 5) {
-    uint32_t iosb = a[1], out = a[2], len = a[3], cls = a[4];
+// the volume information both queries answer: bytes written to out, or 0 for a class the host has none of
+static uint32_t VolumeInformation(uint32_t out, uint32_t len, uint32_t cls) {
     std::memset(HostPtr(out), 0, len);
     switch (cls) {
         case 3:  // FileFsSizeInformation: 16 GiB total, 8 GiB free in 16 KiB units
@@ -596,31 +599,49 @@ KERNEL_EXPORT(218, NtQueryVolumeInformationFile, 5) {
             W64(out + 8, 0x80000);
             W32(out + 0x10, 32);
             W32(out + 0x14, 512);
-            IoStatus(iosb, kSuccess, 0x18);
-            return kSuccess;
+            return 0x18;
         case 7:  // FileFsFullSizeInformation
             W64(out, 0x100000);
             W64(out + 8, 0x80000);
             W64(out + 0x10, 0x80000);
             W32(out + 0x18, 32);
             W32(out + 0x1C, 512);
-            IoStatus(iosb, kSuccess, 0x20);
-            return kSuccess;
+            return 0x20;
         case 1:  // FileFsVolumeInformation
             W32(out + 8, 0x12345678);  // VolumeSerialNumber
-            IoStatus(iosb, kSuccess, 0x18);
-            return kSuccess;
+            return 0x18;
         case 5:  // FileFsAttributeInformation: attributes, max name, name length, "FATX"
             W32(out, 0);
             W32(out + 4, 42);
             W32(out + 8, 4);
             std::memcpy(HostPtr(out + 12), "FATX", 4);
-            IoStatus(iosb, kSuccess, 16);
-            return kSuccess;
+            return 16;
         default:
-            LOG_FIRST(8, "NtQueryVolumeInformationFile: class %u", cls);
-            return kInvalidParameter;
+            return 0;
     }
+}
+
+KERNEL_EXPORT(218, NtQueryVolumeInformationFile, 5) {
+    uint32_t iosb = a[1], out = a[2], len = a[3], cls = a[4];
+    uint32_t n = VolumeInformation(out, len, cls);
+    if (!n) {
+        LOG_FIRST(8, "NtQueryVolumeInformationFile: class %u", cls);
+        return kInvalidParameter;
+    }
+    IoStatus(iosb, kSuccess, n);
+    return kSuccess;
+}
+
+// IoQueryVolumeInformation(file object, class, length, buffer, returned length): the same for a referenced object
+KERNEL_EXPORT(76, IoQueryVolumeInformation, 5) {
+    uint32_t len = a[2], out = a[3], ret = a[4], cls = a[1];
+    uint32_t n = VolumeInformation(out, len, cls);
+    if (!n) {
+        LOG_FIRST(8, "IoQueryVolumeInformation: class %u", cls);
+        return kInvalidParameter;
+    }
+    if (ret) W32(ret, n);
+    return kSuccess;
 }
 
 KERNEL_EXPORT(207, NtQueryDirectoryFile, 10) {
