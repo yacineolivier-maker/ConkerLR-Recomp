@@ -1280,7 +1280,7 @@ HLE_STDCALL(D3DDevice_EndPush, 1) {
 namespace {
 namespace pb {
 uint32_t g_prog[136 * 4], g_prog_load = 0, g_prog_comp = 0, g_const_load = 0, g_const_comp = 0;
-uint32_t g_vb_headers = 0, g_tex_headers = 0;  // 16 vertex buffer and 4 texture headers the draws point at
+uint32_t g_vb_headers = 0, g_tex_headers = 0, g_pal_headers = 0;  // 16 vertex buffer and 4 texture headers the draws point at
 uint32_t g_prim = 0;
 bool g_prog_loaded = false;  // a vertex program came in: the stream draws with it
 std::vector<uint32_t> g_indices;
@@ -1369,6 +1369,7 @@ void Bind() {
     if (!g_vb_headers) {
         g_vb_headers = mem::AllocSystem(16 * 16);
         g_tex_headers = mem::AllocSystem(4 * 32);
+        g_pal_headers = mem::AllocSystem(4 * 16);
     }
     g_state.vs = Program();
     g_state.vs_handle = g_state.vs->handle;
@@ -1396,6 +1397,15 @@ void Bind() {
         W32(h + 12, Simple(base + 4));
         W32(h + 16, w && ht ? (w - 1) | (ht - 1) << 12 | (pitch >= 64 ? pitch / 64 - 1 : 0) << 24 : 0);
         g_state.textures[s] = h;
+        // SET_TEXTURE_PALETTE: address (64 byte aligned), size code in bits 2-3 (256, 128, 64, 32 colours)
+        uint32_t pal = Simple(base + 0x20);
+        if (pal & ~0x3Fu) {
+            uint32_t ph = g_pal_headers + s * 16;
+            W32(ph, 0x00030001 | ((pal >> 2) & 3) << 30);
+            W32(ph + 4, pal & 0x0FFFFFC0);
+            W32(ph + 8, 0);
+            g_state.palettes[s] = ph;
+        }
         auto& t = g_state.tss[s];
         uint32_t addr = Simple(base + 8), filt = Simple(base + 0x14);
         t[gpu::kTssAddressU] = addr & 0xF;
