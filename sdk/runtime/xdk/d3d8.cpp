@@ -86,6 +86,11 @@ constexpr uint32_t kSimpleEncode = SYM(D3D_SimpleRenderStateEncode);
 // formats unless the key matches the one sent last, then keeps the key. RunPushBuffer calls it with 0 before the
 // buffer, so the draws after it send their formats again. Not in the config: found by hand, called at 0x53AE41
 constexpr uint32_t kSetStateFlags = 0x543200;
+// XBE_WATCH_ADDR=<physical hex>: logs the texture binds, push buffer texture offsets and render targets naming it
+bool Watched(uint32_t a) {
+    static const uint32_t w = std::getenv("XBE_WATCH_ADDR") ? uint32_t(std::strtoul(std::getenv("XBE_WATCH_ADDR"), nullptr, 16)) : 0;
+    return w && (a & 0x0FFFFFFF) == (w & 0x0FFFFFFF);
+}
 
 // CDevice fields mirrored so the recompiled getters and resource code see what the XDK would
 constexpr uint32_t kDevPush = XDK_CDevice_Push, kDevThreshold = XDK_CDevice_PushThreshold,
@@ -532,6 +537,7 @@ HLE_STDCALL(D3DDevice_SetRenderTarget, 2) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
     uint32_t rt = a[0] ? a[0] : Dev(kDevRenderTarget), zs = a[1];
+    if (rt && Watched(R32(rt + 4))) LOG_FIRST(40, "watch: SetRenderTarget(%08X) data %08X", rt, R32(rt + 4));
     AddRef(ctx, rt);
     uint32_t old_rt = Dev(kDevRenderTarget), old_zs = Dev(kDevDepth);
     SetDev(kDevRenderTarget, rt);
@@ -779,12 +785,46 @@ HLE_STDCALL(D3DDevice_SetTexture, 2) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
     uint32_t stage = a[0] & 3, tex = a[1];
+    if (tex && Watched(R32(tex + 4))) LOG_FIRST(40, "watch: SetTexture(%u, %08X) data %08X from %08X", stage, tex, R32(tex + 4), R32(ctx.esp));
     uint32_t old = Dev(kDevTextures + stage * 4);
     AddRef(ctx, tex);
     SetDev(kDevTextures + stage * 4, tex);
     Release(ctx, old);
     g_state.textures[stage] = tex;
     W32(kDirtyFlags, R32(kDirtyFlags) | XDK_DirtyFlags_Texture);
+#if XDK_CDevice_PixelShader != 0xFFFFFFFFu
+    // the stage's format bits (+0xC, 0x539960), which the texture modes (0x541C50) read: none, cube, 3D or a
+    // depth format (bit 30, formats 0x2A-0x31 with bit 13 set)
+    {
+        uint32_t info = 0x80000000u;
+        if (tex) {
+            uint32_t format = R32(tex + 12);
+            info = format & 0x20F4;
+            if (info & 0x2000) {
+                info &= ~0x2000u;
+                if ((format & 0xFF00) >= 0x2A00 && (format & 0xFF00) <= 0x3100) info |= 0x40000000u;
+            }
+        }
+        SetDev(0xC + stage * 4, info);
+    }
+    // and the methods it sends: offset and format, a linear texture's pitch and size, the stage turned off or back on
+    // with the control word LazySetStates last sent (+0x774). Push buffers the title records leave the textures out
+    // and draw with these
+    {
+        uint32_t m = 0x1B00 + stage * 0x40;
+        if (!tex) {
+            g_state.simple[(m + 0xC) >> 2] = 0;
+        } else {
+            g_state.simple[m >> 2] = R32(tex + 4);
+            g_state.simple[(m + 4) >> 2] = R32(tex + 12);
+            if (uint32_t size = R32(tex + 16)) {
+                g_state.simple[(m + 0x10) >> 2] = (((size >> 24) + 1) * 64) << 16;
+                g_state.simple[(m + 0x1C) >> 2] = ((size & 0xFFF) + 1) << 16 | (((size >> 12) & 0xFFF) + 1);
+            }
+            if (!old) g_state.simple[(m + 0xC) >> 2] = Dev(0x774 + stage * 4);
+        }
+    }
+#endif
     return 0;
 }
 
@@ -1025,6 +1065,30 @@ HLE_STDCALL(D3DDevice_SetPixelShader, 1) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
     g_state.ps = nullptr;
+    // the device keeps what LazySetStates reads (0x538690): the shader (+0x784), whether it has a final combiner
+    // (+0x788), its texture modes (+0x790), with the combiners, texture modes and fog marked dirty as the library does.
+    // Without it a push buffer run after SetPixelShader(0) finds no fixed function combiners sent and draws with
+    // the last shader's
+#if XDK_CDevice_PixelShader != 0xFFFFFFFFu
+    {
+        constexpr uint32_t kFinalCombiner = XDK_CDevice_PixelShader + 4, kTextureModes = XDK_CDevice_PixelShader + 0xC;
+        constexpr uint32_t kDirtyCombiners = 0x800, kDirtyTextureModes = 0x4000, kDirtyFog = 0x2000;
+        uint32_t flags = R32(kDirtyFlags);
+        SetDev(XDK_CDevice_PixelShader, a[0]);
+        if (!a[0]) {
+            flags |= kDirtyCombiners | kDirtyTextureModes;
+            if (Dev(kFinalCombiner)) flags |= kDirtyFog;
+        } else if (const uint32_t def = R32(a[0] + 8)) {
+            uint32_t final_combiner = R32(def + 0x20) | R32(def + 0x24);
+            if (!final_combiner && Dev(kFinalCombiner)) flags |= kDirtyFog;
+            SetDev(kFinalCombiner, final_combiner);
+            SetDev(XDK_CDevice_PixelShader + 8, R32(def + 0xEC) & 0x100);
+            SetDev(kTextureModes, R32(def + 0xD8));
+            flags |= kDirtyTextureModes;
+        }
+        W32(kDirtyFlags, flags);
+    }
+#endif
     if (!a[0]) return 0;
     auto it = g_ps.find(a[0]);
     if (it != g_ps.end()) {
@@ -1083,6 +1147,9 @@ HLE_STDCALL(D3DDevice_DrawVertices, 3) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Walk(Dev(kDevPush));  // a visibility test begun since the last draw counts this one
     SyncDeferred();
+    if (g_state.rt.header && Watched(g_state.rt.data))
+        LOG_FIRST(10, "watch: DrawVertices(%u, %u, %u) stream0 %08X/%u, library's %08X/%u, from %08X", a[0], a[1], a[2],
+                  g_state.streams[0].vb, g_state.streams[0].stride, R32(kStreams + XDK_Stream_Buffer), R32(kStreams + XDK_Stream_Stride), R32(ctx.esp));
     if (g_backend) g_backend->Draw(g_state, a[0], a[1], a[2], nullptr);
     return 0;
 }
@@ -1736,6 +1803,7 @@ void EndPrimitiveBound() {
 }
 
 void Method(uint32_t m, uint32_t v) {
+    if (m >= 0x1B00 && m < 0x1C00 && (m & 0x3F) == 0 && Watched(v)) LOG_FIRST(40, "watch: push texture %u offset %08X (%s)", (m - 0x1B00) / 0x40, v, g_in_run ? "run" : "walk");
     float f;
     std::memcpy(&f, &v, 4);
     if (m == 0x17FC) {  // begin/end

@@ -1122,6 +1122,12 @@ Target* D3D12Backend::EnsureTarget(const Surface& s, bool depth) {
 
 bool D3D12Backend::BindTargets(const State& s) {
     Target* rt = EnsureTarget(s.rt, false);
+    static const uint32_t watch = std::getenv("XBE_WATCH_ADDR") ? uint32_t(std::strtoul(std::getenv("XBE_WATCH_ADDR"), nullptr, 16)) : 0;
+    if (watch && s.rt.header && (s.rt.data & 0x0FFFFFFF) == (watch & 0x0FFFFFFF)) {
+        uint32_t gw = 0, gh = 0;
+        SurfaceSize(s.rt, gw, gh);
+        LOG_FIRST(20, "watch: draw into %08X (%ux%u, format %08X): target %s", s.rt.data, gw, gh, s.rt.format, rt ? "made" : "none");
+    }
     Target* ds = s.rs[kRsZEnable] || s.rs[kRsStencilEnable] ? EnsureTarget(s.zs, true) : nullptr;
     if (rt && ds && (rt->w != ds->w || rt->h != ds->h)) ds = nullptr;
     if (!rt && !ds) return false;
@@ -2090,7 +2096,7 @@ void FillFogConstants(const State& s, bool vertex_program, DrawConstants& c) {
     c.fog[3] = float(s.rs[kRsFogTableMode]);
 }
 
-void FillSurfaceConstants(const State& s, GuestExtent size, DrawConstants& c) {
+void FillSurfaceConstants(const State& s, GuestExtent size, bool vertex_program, DrawConstants& c) {
     c.surf[0] = float(size.w);
     c.surf[1] = float(size.h);
     c.surf[2] = 1.0f / s.zscale;
@@ -2098,7 +2104,8 @@ void FillSurfaceConstants(const State& s, GuestExtent size, DrawConstants& c) {
     c.misc[0] = float(SimpleState(s, kMAlphaRef) & 0xFF);
     c.misc[1] = SimpleState(s, kMAlphaTestEnable) && !std::getenv("XBE_NOALPHATEST") ? float(Cmp(SimpleState(s, kMAlphaFunc)) - 1) : kAlphaTestAlways;
     c.misc[2] = float(Cmp(s.rs[kRsShadowFunc]) - 1);
-    c.misc[3] = s.rs[kRsSpecularEnable] ? 1.0f : 0.0f;
+    // D3DRS_SPECULARENABLE drives the fixed function lighting only: a vertex program's oD1 reaches v1 as written
+    c.misc[3] = vertex_program || s.rs[kRsSpecularEnable] ? 1.0f : 0.0f;
 }
 
 void FillCombinerConstants(const State& s, DrawConstants& c) {
@@ -2262,7 +2269,7 @@ void D3D12Backend::UploadConstants(const State& s, const DrawShaders& sh, const 
     Alloc vc = Upload(sizeof(s.vsc), 256);
     std::memcpy(vc.cpu, s.vsc.data(), sizeof(s.vsc));
     Alloc dc = Upload(sizeof(DrawConstants), 256);
-    FillSurfaceConstants(s, size, c);
+    FillSurfaceConstants(s, size, sh.prog, c);
     // points: host pixels per console pixel, also keeps them off the far edge pull out of screen passes
     if (k.topo == uint32_t(Topology::Points)) c.surf[3] = PointScale();
     FillFogConstants(s, sh.prog, c);
@@ -2373,7 +2380,8 @@ void D3D12Backend::CaptureDraw(const State& s, uint32_t prim, uint32_t count, co
 
 // small draws: their inputs and constants; then ends the draw's line
 void D3D12Backend::EndDrawCapture(const State& s, const Assembled& a, uint32_t count, const DrawConstants& c) {
-    if (count <= kQuadVertices || ((s.vs_handle & 0xF0000000) == 0x40000000 && cap_i_ < 80)) CaptureInputs(s, a, c);
+    static const bool all = std::getenv("XBE_CAPTURE_INPUTS") != nullptr;  // every draw's inputs and constants
+    if (all || count <= kQuadVertices || ((s.vs_handle & 0xF0000000) == 0x40000000 && cap_i_ < 80)) CaptureInputs(s, a, c);
     fputc('\n', cap_);
 }
 
@@ -2590,11 +2598,33 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     PerfScope perf_draw{g_perf.draw};
     g_perf.draws++;
     if (cap_) CapStep(s.rt);
-    if (DepthCopy(s)) return;
+    static const uint32_t watch = std::getenv("XBE_WATCH_ADDR") ? uint32_t(std::strtoul(std::getenv("XBE_WATCH_ADDR"), nullptr, 16)) : 0;
+    bool watched = watch && s.rt.header && (s.rt.data & 0x0FFFFFFF) == (watch & 0x0FFFFFFF);
+    if (DepthCopy(s)) {
+        if (watched) LOG_FIRST(20, "watch: draw into %08X taken as a depth copy", s.rt.data);
+        return;
+    }
     DrawEnd draw_end{ext_};
     if (ext_) ext_->BeginDraw(s);
     Assembled& a = asm_;
-    if (!AssembleDraw(s, prim, start, count, indices, a)) return;
+    if (!AssembleDraw(s, prim, start, count, indices, a)) {
+        // nothing to draw (a stream the title never set: the console reads one vertex over and over), but the target
+        // was drawn to: it exists from now on, empty, rather than the memory it was given being read as pixels
+        if (s.rt.header && !FindTarget(s.rt, false)) BindTargets(s);
+        if (watched) {
+            int inputs = 0;
+            if (s.vs) for (const auto& in : s.vs->inputs) inputs += in.type != 0;
+            LOG_FIRST(20, "watch: draw into %08X not assembled (prim %u count %u), vs %08X program %zu inputs %d stream0 %08X/%u",
+                      s.rt.data, prim, count, s.vs_handle, s.vs ? s.vs->program.size() : 0, inputs, s.streams[0].vb, s.streams[0].stride);
+            if (s.vs)
+                for (int r = 0; r < 16; r++)
+                    if (s.vs->inputs[size_t(r)].type)
+                        LOG_FIRST(20, "watch:   v%d stream %d offset %u type %X, stream vb %08X stride %u", r, s.vs->inputs[size_t(r)].stream,
+                                  s.vs->inputs[size_t(r)].offset, s.vs->inputs[size_t(r)].type,
+                                  s.streams[size_t(s.vs->inputs[size_t(r)].stream & 15)].vb, s.streams[size_t(s.vs->inputs[size_t(r)].stream & 15)].stride);
+        }
+        return;
+    }
     // past the ring every upload is a buffer of its own: seconds lost on a frame that draws a whole level once
     if (CurrentFrame().used > kUploadSize - kUploadReserve) Submit(true);
     if (!BindTargets(s)) return;
