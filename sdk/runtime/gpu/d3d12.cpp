@@ -594,6 +594,7 @@ private:
     TargetSlot FindTargetSlot(const Surface& s, bool depth, uint64_t alt);
     uint64_t SizedTargetKey(uint32_t data, bool depth, uint32_t gw, uint32_t gh) const;
     bool TargetStale(uint32_t data) const;
+    bool TargetOutlived(Target& t);
     void ReleaseTarget(std::unordered_map<uint64_t, Target>::iterator it);
     bool CreateTargetResource(Target& t, const Surface& s);
     bool CreateTargetView(Target& t);
@@ -1002,6 +1003,7 @@ void D3D12Backend::Transition(ID3D12Resource* r, D3D12_RESOURCE_STATES& cur, D3D
 // a resized target gives back its view and its resources
 void D3D12Backend::ReleaseTarget(std::unordered_map<uint64_t, Target>::iterator it) {
     if (bound_rt_ == &it->second || bound_ds_ == &it->second) bound_rt_ = bound_ds_ = nullptr;
+    if (ext_) ext_->Dropped(it->second);
     (it->second.depth ? free_dsv_ : free_rtv_).push_back(it->second.view);
     CurrentFrame().garbage.push_back(it->second.res);
     if (it->second.fb) CurrentFrame().garbage.push_back(it->second.fb);
@@ -1838,7 +1840,9 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
     if (ext_) ext_->Sample(d.data, fi.depth, stage, alt, stages.k[stage], box);
     auto tit = targets_.find(SizedTargetKey(d.data, fi.depth, d.width, d.height) | alt);
     if (tit != targets_.end() && !d.cube && d.depth == 1 && !fi.compressed) {
-        return BindTargetTexture(s, stage, d, tit->second, box, stages);
+        if (!TargetOutlived(tit->second)) return BindTargetTexture(s, stage, d, tit->second, box, stages);
+        LOG_FIRST(16, "d3d12: target %08X %ux%u no longer drawn and its memory rewritten: read as a texture", d.data, d.width, d.height);
+        ReleaseTarget(tit);
     }
     return BindGuestTexture(s, stage, d, fi, stages);
 }
@@ -3085,6 +3089,14 @@ D3D12Backend::CopySource D3D12Backend::PrepareCopySource(Target& t, const Shrink
 }
 
 // long unused: the title freed it and other data is at this address now
+// a target nothing renders to any more whose memory the CPU rewrote without a lock (a level's textures loaded where a
+// surface was): the memory is the texture now. Compared once a frame, only while the target is stale
+bool D3D12Backend::TargetOutlived(Target& t) {
+    if (t.depth || !TargetStale(t.data) || t.checked == frame_) return false;
+    t.checked = frame_;
+    return MemSig(t.data, t.bytes) != t.sig;
+}
+
 bool D3D12Backend::TargetStale(uint32_t data) const {
     auto it = target_used_.find(data);
     uint64_t used = it == target_used_.end() ? 0 : it->second;

@@ -168,6 +168,14 @@ public:
         return false;
     }
 
+    void Dropped(const gpu::Target& t) override {
+        shadows_.erase(std::remove(shadows_.begin(), shadows_.end(), &t), shadows_.end());
+        if (scene_ == &t || scene_ds_ == &t) {
+            scene_ = scene_ds_ = nullptr;
+            draws_ = 0;
+        }
+    }
+
     void Present(gpu::Context& c, gpu::Target& t) override {
         if (!shadows_.empty()) Soften(c);
         if (g_occlusion && !ao_failed_ && !applied_ && scene_ == &t && draws_ >= kMinSceneDraws && cam_.ok) Occlusion(c);

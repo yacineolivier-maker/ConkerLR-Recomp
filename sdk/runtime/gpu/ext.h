@@ -36,6 +36,7 @@ struct Target {
     DXGI_FORMAT fmt = DXGI_FORMAT_B8G8R8A8_UNORM;
     float range = 1;         // colour held divided by it until the extension resolves the target
     uint64_t tag = ~0ull;    // the extension's
+    uint64_t checked = 0;    // frame its memory was last compared, while no draw renders to it
 };
 
 // what the renderer lends an extension, on the render thread
@@ -90,6 +91,8 @@ public:
     virtual void Resolve(Context&, Target&) {}
     // the target about to be shown, resolved: post processing in place
     virtual void Present(Context&, Target&) {}
+    // a target goes away: pointers to it must be dropped
+    virtual void Dropped(const Target&) {}
 };
 
 inline std::unique_ptr<Extension> g_extension;
