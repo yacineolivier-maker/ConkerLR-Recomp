@@ -483,9 +483,9 @@ private:
         if (t.range != 1 && ext_) ext_->Resolve(*this, t);
     }
     // Pass, then its step
-    void Pass(const char* hlsl, const char* entry, DXGI_FORMAT rtv, D3D12_CPU_DESCRIPTOR_HANDLE rh, uint32_t w,
-              uint32_t h, ID3D12Resource* const src[3], const DXGI_FORMAT fmt[3], const float p[8],
-              float blend) override;
+    bool Pass(const char* hlsl, const char* entry, DXGI_FORMAT rtv, D3D12_CPU_DESCRIPTOR_HANDLE rh, uint32_t w,
+              uint32_t h, ID3D12Resource* const src[3], const DXGI_FORMAT fmt[3], const float* p,
+              float blend, uint32_t np = 8) override;
     ID3D12PipelineState* EnsurePassPipeline(const char* hlsl, const char* entry, DXGI_FORMAT rtv, float blend);
     // Draw, in call order, each callee right after its caller
     bool DepthCopy(const State& s);
@@ -1423,11 +1423,11 @@ ID3D12PipelineState* D3D12Backend::EnsurePassPipeline(const char* hlsl, const ch
     return pso.Get();
 }
 
-void D3D12Backend::Pass(const char* hlsl, const char* entry, DXGI_FORMAT rtv, D3D12_CPU_DESCRIPTOR_HANDLE rh,
+bool D3D12Backend::Pass(const char* hlsl, const char* entry, DXGI_FORMAT rtv, D3D12_CPU_DESCRIPTOR_HANDLE rh,
                         uint32_t w, uint32_t h, ID3D12Resource* const src[3], const DXGI_FORMAT fmt[3],
-                        const float p[8], float blend) {
+                        const float* p, float blend, uint32_t np) {
     ID3D12PipelineState* pso = EnsurePassPipeline(hlsl, entry, rtv, blend);
-    if (!pso) return;
+    if (!pso) return false;
     uint32_t slot = AllocSrvSlots(4);
     for (int i = 0; i < 4; i++) {
         D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
@@ -1438,7 +1438,7 @@ void D3D12Backend::Pass(const char* hlsl, const char* entry, DXGI_FORMAT rtv, D3
         dev_->CreateShaderResourceView(i < 3 ? src[i] : nullptr, &sv, Cpu(srv_heap_.Get(), slot + i, srv_inc_));
     }
     Alloc cb = Upload(256, 256);
-    std::memcpy(cb.cpu, p, 8 * sizeof(float));
+    std::memcpy(cb.cpu, p, std::min<uint32_t>(np, 64) * sizeof(float));
     cl_->OMSetRenderTargets(1, &rh, FALSE, nullptr);
     SetFullViewport(w, h);
     if (blend >= 0) {
@@ -1447,6 +1447,7 @@ void D3D12Backend::Pass(const char* hlsl, const char* entry, DXGI_FORMAT rtv, D3
     }
     DrawFullScreen(pso, cb.gpu, slot);
     bound_rt_ = bound_ds_ = nullptr;
+    return true;
 }
 
 // a copy of the target to read while drawing to it
@@ -2980,6 +2981,10 @@ void D3D12Backend::Present(const Surface& front) {
     Target* t = EnsureTarget(front, false);
     if (t && LatchCpuWrite(*t)) UploadTarget(*t, front);
     if (t) Resolve(*t);
+    if (t && ext_) {
+        ext_->Present(*this, *t);
+        bound_rt_ = bound_ds_ = nullptr;
+    }
     if (ramp_dirty_) UploadGammaRamp();
     Transition(lut_.Get(), lut_state_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
