@@ -81,6 +81,10 @@ constexpr uint32_t kTextureState = SYM(D3D_DeferredTextureState);  // [4][32]
 constexpr uint32_t kRenderState = SYM(D3D_RenderState);            // [166]
 constexpr uint32_t kStreams = SYM(D3D_Streams);                    // [16] stride, offset, buffer
 constexpr uint32_t kSimpleEncode = SYM(D3D_SimpleRenderStateEncode);
+// (device, vertex format key): sends the pending deferred states (LazySetStates) and the current shader's vertex
+// formats unless the key matches the one sent last, then keeps the key. RunPushBuffer calls it with 0 before the
+// buffer, so the draws after it send their formats again. Not in the config: found by hand, called at 0x53AE41
+constexpr uint32_t kSetStateFlags = 0x543200;
 
 // CDevice fields mirrored so the recompiled getters and resource code see what the XDK would
 constexpr uint32_t kDevPush = XDK_CDevice_Push, kDevThreshold = XDK_CDevice_PushThreshold,
@@ -1353,6 +1357,7 @@ uint32_t g_vb_headers = 0, g_tex_headers = 0, g_pal_headers = 0;  // 16 vertex b
 uint32_t g_prim = 0;
 bool g_in_run = false;  // inside RunPushBuffer, not the title's own pushes
 bool g_prog_loaded = false;  // a vertex program came in: the stream draws with it
+bool g_fog_seen = false;     // SET_FOG_ENABLE came through a push: the fog methods hold the hardware's fog
 std::vector<uint32_t> g_indices;
 std::vector<uint32_t> g_inline_pb;  // an inline array's dwords between begin and end
 
@@ -1557,6 +1562,32 @@ void Bind() {
         cull = Simple(0x39C) == 0x404 ? d3d_front : d3d_front ^ 1;  // D3DCULL_CW 0x900 / D3DCULL_CCW 0x901
     }
     g_state.rs[gpu::kRsCullMode] = cull;
+    // fog as LazySetStates or the recorded buffer last left it: D3DRS_FOG* may have moved on since. The XDK writes
+    // linear as p0 + d p1 - 1 (p0 = 1 + end / (end - start), p1 = -1 / (end - start); 1 and 1 for table none,
+    // the vertex program's oFog as is), exp as p1 = density * -0.0901681 and exp2 as p1 = density * -0.21233
+    if (g_fog_seen) {
+        auto fbits = [](float f) { uint32_t u; std::memcpy(&u, &f, 4); return u; };
+        auto fval = [](uint32_t u) { float f; std::memcpy(&f, &u, 4); return f; };
+        uint32_t mode = Simple(0x29C);
+        float p0 = fval(Simple(0x9C0)), p1 = fval(Simple(0x9C4));
+        uint32_t table = 3;  // D3DFOG_LINEAR
+        float start = 1, end = 0, density = 0;
+        if (mode == 0x800 || mode == 0x802) {
+            table = 1, density = p1 / -0.0901680737733841f;
+        } else if (mode == 0x801 || mode == 0x803) {
+            table = 2, density = std::fabs(p1 / 0.21233002841472626f);
+        } else if (p1 != 0) {
+            start = (2 - p0) / p1, end = (1 - p0) / p1;
+        }
+        if (g_state.rs[gpu::kRsFogEnable] != (Simple(0x2A4) ? 1u : 0u))
+            LOG_FIRST(20, "d3d: push fog enable %u mode %X %g %g, D3D states had enable %u table %u", Simple(0x2A4), mode, p0, p1,
+                      g_state.rs[gpu::kRsFogEnable], g_state.rs[gpu::kRsFogTableMode]);
+        g_state.rs[gpu::kRsFogEnable] = Simple(0x2A4) ? 1 : 0;
+        g_state.rs[gpu::kRsFogTableMode] = table;
+        g_state.rs[gpu::kRsFogStart] = fbits(start);
+        g_state.rs[gpu::kRsFogEnd] = fbits(end);
+        g_state.rs[gpu::kRsFogDensity] = fbits(density);
+    }
     static uint64_t seen = 0;
     uint64_t key = uint64_t(Simple(0x308)) << 40 ^ uint64_t(Simple(0x39C)) << 20 ^ Simple(0x3A0);
     if (key != seen && (seen = key, true))
@@ -1708,6 +1739,7 @@ void Method(uint32_t m, uint32_t v) {
             if (std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() >= after && n++ < 200)
                 LOGI("d3d: %s %u (%s)", m == 0x1EA4 ? "const load" : "prog start", v, g_in_run ? "run" : "walk");
         }
+        if (m == 0x2A4) g_fog_seen = true;
         ApplyVisibilityMethod(m, v);
         g_state.simple[m >> 2] = v;
     }
@@ -1777,6 +1809,10 @@ HLE_STDCALL(D3DDevice_RunPushBuffer, 2) {
     Walk(Dev(kDevPush));
     uint32_t buf = a[0], fixup = a[1];
     if (!buf) return 0;
+    // as the library does first: the states left pending (fog, ...) reach the hardware before the buffer, and the
+    // vertex formats the buffer overwrites are sent again by the next draw
+    kernel::CallGuest(ctx, kSetStateFlags, {R32(kDevicePtr), 0});
+    Walk(Dev(kDevPush));
     uint32_t data = pb::Guest(R32(buf + 4)), size = R32(buf + 12);
     if (fixup) pb::ApplyFixups(fixup, data);
     // what the title had bound stays bound for its own draws after this
