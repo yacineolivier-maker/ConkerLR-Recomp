@@ -537,6 +537,8 @@ private:
     void DeliverReports();
     // shaders by source hash: Compile returns the bytecode and sets hash
     ID3DBlob* Compile(const std::string& src, const char* entry, const char* profile, uint64_t& hash);
+    bool LoadCachedBlob(uint64_t hash, ComPtr<ID3DBlob>& code);
+    void StoreCachedBlob(uint64_t hash, ID3DBlob* code);
     // Blit's pipeline
     ID3D12PipelineState* EnsureBlitPipeline(DXGI_FORMAT rtv, bool over = false);
     D3D12_GRAPHICS_PIPELINE_STATE_DESC FullScreenPipelineDesc(ID3DBlob* vs, ID3DBlob* ps, DXGI_FORMAT rtv) const;
@@ -1345,6 +1347,10 @@ ID3DBlob* D3D12Backend::Compile(const std::string& src, const char* entry, const
     auto it = blobs_.find(hash);
     if (it != blobs_.end()) return it->second.Get();
     ComPtr<ID3DBlob> code;
+    if (LoadCachedBlob(hash, code)) {
+        blobs_[hash] = code;
+        return code.Get();
+    }
     ComPtr<ID3DBlob> err;
     PerfScope perf_compile{g_perf.compile};
     g_perf.shaders++;
@@ -1356,8 +1362,53 @@ ID3DBlob* D3D12Backend::Compile(const std::string& src, const char* entry, const
         blobs_[hash] = nullptr;
         return nullptr;
     }
+    StoreCachedBlob(hash, code.Get());
     blobs_[hash] = code;
     return code.Get();
+}
+
+// Compiled shaders kept beside the exe, by source hash: a later run skips the compiler, which otherwise stalls the
+// frames that meet a shader for the first time. The salt changes with the compiler options.
+namespace {
+constexpr uint64_t kShaderCacheSalt = 0xC0DE0001;
+std::filesystem::path ShaderCachePath(uint64_t hash) {
+    static const std::filesystem::path dir = [] {
+        std::filesystem::path d = app::ExeDir() / "cache" / "shaders";
+        std::error_code ec;
+        std::filesystem::create_directories(d, ec);
+        return d;
+    }();
+    char name[32];
+    snprintf(name, sizeof(name), "%016llX.cso", (unsigned long long)(hash ^ kShaderCacheSalt));
+    return dir / name;
+}
+}  // namespace
+
+bool D3D12Backend::LoadCachedBlob(uint64_t hash, ComPtr<ID3DBlob>& code) {
+    FILE* f = _wfopen(ShaderCachePath(hash).c_str(), L"rb");
+    if (!f) return false;
+    bool ok = false;
+    if (fseek(f, 0, SEEK_END) == 0) {
+        long n = ftell(f);
+        if (n > 0 && fseek(f, 0, SEEK_SET) == 0 && SUCCEEDED(D3DCreateBlob(SIZE_T(n), &code)))
+            ok = fread(code->GetBufferPointer(), 1, size_t(n), f) == size_t(n);
+    }
+    fclose(f);
+    if (!ok) code.Reset();
+    return ok;
+}
+
+void D3D12Backend::StoreCachedBlob(uint64_t hash, ID3DBlob* code) {
+    // written whole under another name first: a run stopped midway leaves no torn file behind
+    std::filesystem::path path = ShaderCachePath(hash), part = path;
+    part += L".part";
+    FILE* f = _wfopen(part.c_str(), L"wb");
+    if (!f) return;
+    bool ok = fwrite(code->GetBufferPointer(), 1, code->GetBufferSize(), f) == code->GetBufferSize();
+    ok = fclose(f) == 0 && ok;
+    std::error_code ec;
+    if (ok) std::filesystem::rename(part, path, ec);
+    if (!ok || ec) std::filesystem::remove(part, ec);
 }
 
 // a full screen pass's pipeline: solid, no culling, one target, writing all channels; callers set the blend
