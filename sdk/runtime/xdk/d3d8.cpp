@@ -30,6 +30,7 @@ void LoadProgram(const std::vector<uint32_t>& prog, uint32_t address);
 uint64_t Fnv(const void* p, size_t n, uint64_t h);
 // the bound program read with the packed vertices of an inline array, laid out by the pushed array formats
 std::shared_ptr<gpu::VertexShader> InlineLayout(const std::shared_ptr<gpu::VertexShader>& program, uint32_t& stride);
+extern bool g_fog_seen;
 }  // namespace pb
 }  // namespace
 
@@ -1297,7 +1298,10 @@ void Walk(uint32_t end) {
                 // vertex programs and constants load as on the GPU (constant writes the title inlined); any other
                 // method the title pushed itself is a simple state, as EndPush takes it
                 if ((m >= 0x0B00 && m < 0x0C00) || m == 0x1E9C || m == 0x1EA4) pb::Method(m, v);
-                else if (m >> 2 < g_state.simple.size() && !(m >= 0x1800 && m < 0x1B00)) g_state.simple[m >> 2] = v;
+                else if (m >> 2 < g_state.simple.size() && !(m >= 0x1800 && m < 0x1B00)) {
+                    if (m == 0x2A4) pb::g_fog_seen = true;  // LazySetStates sent the fog: push buffer draws use it
+                    g_state.simple[m >> 2] = v;
+                }
                 continue;
             }
             if (!g_im_prim) continue;
