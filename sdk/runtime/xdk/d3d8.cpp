@@ -1819,7 +1819,13 @@ HLE_STDCALL(D3DDevice_RunPushBuffer, 2) {
     if (!buf) return 0;
     // as the library does first: the states left pending (fog, ...) reach the hardware before the buffer, and the
     // vertex formats the buffer overwrites are sent again by the next draw
-    kernel::CallGuest(ctx, kSetStateFlags, {R32(kDevicePtr), 0});
+    // with the shader dirty it reads the device's current shader object, which SelectVertexShader(0) leaves null
+    uint32_t shader = Dev(XDK_CDevice_VertexShader);
+#if HAS_D3D_FvfShader
+    if (!shader) SetDev(XDK_CDevice_VertexShader, SYM(D3D_FvfShader));
+#endif
+    if (Dev(XDK_CDevice_VertexShader)) kernel::CallGuest(ctx, kSetStateFlags, {R32(kDevicePtr), 0});
+    SetDev(XDK_CDevice_VertexShader, shader);
     Walk(Dev(kDevPush));
     uint32_t data = pb::Guest(R32(buf + 4)), size = R32(buf + 12);
     if (fixup) pb::ApplyFixups(fixup, data);
