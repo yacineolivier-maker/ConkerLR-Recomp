@@ -10,6 +10,9 @@ extern bool g_smaa, g_occlusion, g_ombres_douces;
 extern uint32_t g_occlusion_rayon, g_occlusion_force, g_nettete;
 void InstallRendu();
 bool RenduKey(uint32_t vk);
+// options.cpp
+bool OptionsKey(uint32_t vk);
+void OptionsUi(double fps);
 
 void Init() {
     StartHangWatch();
@@ -18,7 +21,7 @@ void Init() {
 
 bool Message(void*, uint32_t msg, uintptr_t wp, intptr_t, intptr_t* result) {
     constexpr uint32_t kKeyDown = 0x0100;  // WM_KEYDOWN
-    if (msg != kKeyDown || !RenduKey(uint32_t(wp))) return false;
+    if (msg != kKeyDown || !(RenduKey(uint32_t(wp)) || OptionsKey(uint32_t(wp)))) return false;
     *result = 0;
     return true;
 }
@@ -47,7 +50,7 @@ const app::GameInfo app::kGame = {
     .loaded = game::StartApu,
     .window = nullptr,
     .message = game::Message,
-    .ui = nullptr,
+    .ui = game::OptionsUi,
     .pad = game::AutoPad,
     .rumble = nullptr,
 };
