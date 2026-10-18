@@ -1541,9 +1541,18 @@ void Bind() {
         W32(h, 0x00040001);  // texture, one reference
         W32(h + 4, Simple(base) & 0x0FFFFFFF);
         W32(h + 8, 0);
-        W32(h + 12, Simple(base + 4));
-        // a swizzled texture's size is in its format (log2 dimensions), only a linear one has a size field
-        bool swizzled = (Simple(base + 4) >> 20) & 0xFF;
+        // a swizzled texture's size is in its format (log2 dimensions), only a linear one has a size field. The format
+        // code decides: a swizzled or compressed one without its log2 sizes takes them from the image rect
+        uint32_t format = Simple(base + 4);
+        const gpu::FormatInfo& fi = gpu::Format((format >> 8) & 0xFF);
+        bool swizzled = fi.swizzled || fi.compressed || ((format >> 20) & 0xFF);
+        if ((fi.swizzled || fi.compressed) && !((format >> 20) & 0xFF) && w && ht) {
+            auto log2 = [](uint32_t v) { uint32_t l = 0; while ((1u << (l + 1)) <= v && l < 15) l++; return l; };
+            format |= log2(w) << 20 | log2(ht) << 24;
+            LOG_FIRST(8, "d3d: push texture format %08X (%s) without its log2 sizes, %ux%u from the image rect", Simple(base + 4),
+                      fi.name, w, ht);
+        }
+        W32(h + 12, format);
         W32(h + 16, !swizzled && w && ht ? (w - 1) | (ht - 1) << 12 | (pitch >= 64 ? pitch / 64 - 1 : 0) << 24 : 0);
         g_state.textures[s] = h;
         // SET_TEXTURE_PALETTE: address (64 byte aligned), size code in bits 2-3 (256, 128, 64, 32 colours)
