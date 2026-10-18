@@ -1231,7 +1231,15 @@ void Walk(uint32_t end) {
                     uint32_t stride = VertexBytes(), bytes = uint32_t(g_inline.size()) * 4;
                     auto bound = g_state.vs;
                     uint32_t bound_handle = g_state.vs_handle, packed = 0;
-                    if (auto layout = pb::InlineLayout(bound_handle & 1 ? bound : nullptr, packed); layout && packed) {
+                    // the pushed formats, unless they do not divide the data and the bound shader's stride does (formats a
+                    // push buffer left that the library did not send again)
+                    auto layout = pb::InlineLayout(bound_handle & 1 ? bound : nullptr, packed);
+                    if (layout && packed && bytes % packed != 0 && stride && bytes % stride == 0) {
+                        LOG_FIRST(20, "d3d: pushed primitive %u: formats of %u bytes do not divide %u, bound stride %u used", g_im_prim, packed,
+                                  bytes, stride);
+                        layout = nullptr;
+                    }
+                    if (layout && packed) {
                         g_state.vs = layout;
                         g_state.vs_handle = layout->handle;
                         stride = packed;

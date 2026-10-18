@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <unordered_set>
 
 #include <dxgiformat.h>
 
@@ -268,46 +269,53 @@ uint32_t StrideOf(const State& s, const VertexShader& layout, const VertexShader
 constexpr uint32_t kStrideAlign = 4;            // the input assembler reads strides in dwords
 constexpr uint32_t kElementOffsetEnd = 0x10000;  // the element offset is stored as uint16_t
 
+// the input assembler reads strides in dwords: a stream with another stride is copied out with each vertex padded
+uint32_t HostStride(uint32_t stride) { return (stride + kStrideAlign - 1) & ~(kStrideAlign - 1); }
+
 bool RawReadable(const State& s, const Inputs& inputs) {
     for (int k = 0; k < inputs.nregs; k++) {
         const auto& in = inputs.layout.inputs[size_t(inputs.regs[k])];
         HostElement he = HostFormat(in.type);
         uint32_t stride = StrideOf(s, inputs.layout, in);
-        bool readable = he.format && stride && stride % kStrideAlign == 0 && in.offset < kElementOffsetEnd &&
+        // padded, the element must not read into the padding past the vertex unless the format's extra component is
+        // replaced by the decode (SHORT3 and the 3 component bytes read as 4)
+        bool padded = stride % kStrideAlign != 0;
+        bool fits = !padded || (in.offset + he.bytes <= HostStride(stride) &&
+                                (in.offset + he.bytes <= stride || he.decode == kDecodeW1 || he.decode == kDecodeIntW1));
+        bool readable = he.format && stride && fits && in.offset < kElementOffsetEnd &&
                         in.offset % std::min<uint32_t>(he.bytes, 4) == 0;
         if (!readable) {
-            LOG_FIRST(32, "vertex: converted on the CPU: v%d type %02X offset %u stride %u", inputs.regs[k], in.type,
-                      in.offset, stride);
+            static std::unordered_set<uint32_t> told;
+            if (told.size() < 64 && told.insert(in.type << 16 | (stride & 0xFFFF)).second)
+                LOG_FIRST(64, "vertex: converted on the CPU: v%d type %02X offset %u stride %u", inputs.regs[k], in.type,
+                          in.offset, stride);
             return false;
         }
     }
     return true;
 }
 
-// sparse indices: the vertices they read, copied in draw order
-void GatherVertices(const State& s, const DrawRange& d, const uint8_t* data, uint32_t stride,
-                    std::vector<uint8_t>& g) {
-    g.resize(size_t(d.count) * stride);
-    for (uint32_t i = 0; i < d.count; i++) {
-        std::memcpy(&g[size_t(i) * stride], data + size_t(DrawVertex(s, d, i)) * stride, stride);
-    }
-}
-
-// returns the buffer slot the stream got
+// returns the buffer slot the stream got: read in place when dense with a dword stride, else its vertices copied
+// (in draw order when the indices are sparse), each padded to a dword stride
 int AddRawBuffer(const State& s, const VertexShader& layout, const VertexShader::Input& in, const DrawRange& d,
                  bool dense, Assembled& out) {
     using namespace kernel;
     const auto& st = s.streams[size_t(in.stream)];
-    uint32_t stride = StrideOf(s, layout, in);
+    uint32_t stride = StrideOf(s, layout, in), host = HostStride(stride);
     const uint8_t* data = static_cast<const uint8_t*>(HostPtr(mem::VirtualFromPhysical(R32(st.vb + kResData))));
     int slot = int(out.buffer_count);
-    if (dense) {
+    if (dense && host == stride) {
         out.buffers[out.buffer_count++] = {data + size_t(d.first_vertex) * stride, d.span * stride, stride};
-    } else {
-        auto& g = out.gathered[out.buffer_count];
-        GatherVertices(s, d, data, stride, g);
-        out.buffers[out.buffer_count++] = {g.data(), d.count * stride, stride};
+        return slot;
     }
+    auto& g = out.gathered[out.buffer_count];
+    uint32_t n = dense ? d.span : d.count;
+    g.assign(size_t(n) * host, 0);
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t id = dense ? d.first_vertex + i : DrawVertex(s, d, i);
+        std::memcpy(&g[size_t(i) * host], data + size_t(id) * stride, stride);
+    }
+    out.buffers[out.buffer_count++] = {g.data(), n * host, host};
     return slot;
 }
 
