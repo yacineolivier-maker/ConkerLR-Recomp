@@ -2293,6 +2293,47 @@ void D3D12Backend::CaptureInputs(const State& s, const Assembled& a, const DrawC
         for (uint32_t k = 0; k < n * 4; k++) fprintf(cap_, " %g", a.vertices[v * n * 4 + k]);
         fprintf(cap_, " ]");
     }
+    // read raw by the input assembler: each register's first vertices as its host format holds them
+    if (a.vertices.empty()) {
+        for (int r = 0; r < 16; r++) {
+            if (!((a.regs >> r) & 1)) continue;
+            const VertexElement& e = a.elements[size_t(r)];
+            const VertexBuffer& b = a.buffers[e.buffer];
+            fprintf(cap_, "\n     raw v%d fmt %u off %u stride %u:", r, e.format, e.offset, b.stride);
+            for (size_t v = 0; v < kVerts && b.src && b.stride && (v + 1) * b.stride <= b.bytes; v++) {
+                const uint8_t* p = b.src + v * b.stride + e.offset;
+                fprintf(cap_, " [");
+                switch (e.format) {
+                    case DXGI_FORMAT_R32G32B32A32_FLOAT: case DXGI_FORMAT_R32G32B32_FLOAT: case DXGI_FORMAT_R32G32_FLOAT:
+                    case DXGI_FORMAT_R32_FLOAT: {
+                        uint32_t n = e.format == DXGI_FORMAT_R32G32B32A32_FLOAT ? 4 : e.format == DXGI_FORMAT_R32G32B32_FLOAT ? 3
+                                     : e.format == DXGI_FORMAT_R32G32_FLOAT ? 2 : 1;
+                        for (uint32_t k = 0; k < n; k++) {
+                            float f;
+                            std::memcpy(&f, p + k * 4, 4);
+                            fprintf(cap_, " %g", f);
+                        }
+                        break;
+                    }
+                    case DXGI_FORMAT_R16G16B16A16_SINT: case DXGI_FORMAT_R16G16_SINT: case DXGI_FORMAT_R16_SINT:
+                    case DXGI_FORMAT_R16G16B16A16_SNORM: case DXGI_FORMAT_R16G16_SNORM: case DXGI_FORMAT_R16_SNORM: {
+                        uint32_t n = (e.format == DXGI_FORMAT_R16G16B16A16_SINT || e.format == DXGI_FORMAT_R16G16B16A16_SNORM) ? 4
+                                     : (e.format == DXGI_FORMAT_R16G16_SINT || e.format == DXGI_FORMAT_R16G16_SNORM) ? 2 : 1;
+                        for (uint32_t k = 0; k < n; k++) {
+                            int16_t x;
+                            std::memcpy(&x, p + k * 2, 2);
+                            fprintf(cap_, " %d", x);
+                        }
+                        break;
+                    }
+                    default:
+                        for (uint32_t k = 0; k < 4; k++) fprintf(cap_, " %02X", p[k]);
+                        break;
+                }
+                fprintf(cap_, " ]");
+            }
+        }
+    }
     for (int r = 0; r < kVsConstants; r++) {
         const auto& v = s.vsc[r];
         if (v[0] || v[1] || v[2] || v[3]) {
