@@ -19,6 +19,18 @@
 
 using namespace kernel;
 
+// the push buffer executor's method handling (below), which pushes the title writes itself go through as well
+namespace {
+namespace pb {
+void Method(uint32_t m, uint32_t v);
+// the vertex program loaded at an address of the GPU's program memory, up to its last instruction
+std::vector<uint32_t> ProgramFrom(uint32_t start);
+uint64_t Fnv(const void* p, size_t n, uint64_t h);
+// the bound program read with the packed vertices of an inline array, laid out by the pushed array formats
+std::shared_ptr<gpu::VertexShader> InlineLayout(const std::shared_ptr<gpu::VertexShader>& program, uint32_t& stride);
+}  // namespace pb
+}  // namespace
+
 // configs written before the SDK knew the name
 #ifndef SYM_D3DDevice_BeginPush
 #define SYM_D3DDevice_BeginPush FFFFFE00
@@ -212,13 +224,14 @@ void SetComplex(uint32_t rs, uint32_t v) {
         case gpu::kRsStencilEnable: m[0x32C >> 2] = v != 0; break;
         case gpu::kRsStencilFail: m[0x370 >> 2] = v; break;
         case gpu::kRsFillMode: m[0x38C >> 2] = v; m[0x390 >> 2] = v; break;
-        case gpu::kRsCullMode:  // D3DCULL_CW culls clockwise faces: counter clockwise is the front, the back is culled
+        case gpu::kRsCullMode: {  // as the XDK pushes it: cull the front when the mode names the front face's winding
+            uint32_t front = g_state.rs[gpu::kRsFrontFace] ? g_state.rs[gpu::kRsFrontFace] : 0x900;
             m[0x308 >> 2] = v != 0;
-            if (v) {
-                m[0x39C >> 2] = 0x405;
-                m[0x3A0 >> 2] = v == 0x900 ? 0x901 : 0x900;
-            }
+            if (v) m[0x39C >> 2] = v == front ? 0x404 : 0x405;
+            m[0x3A0 >> 2] = front ^ 1;
             break;
+        }
+        case gpu::kRsFrontFace: m[0x3A0 >> 2] = (v ? v : 0x900) ^ 1; break;
         default: break;
     }
 }
@@ -923,8 +936,41 @@ HLE_STDCALL(D3DDevice_LoadVertexShader, 2) {
     LOG_FIRST(4, "d3d: LoadVertexShader %08X at %u is not supported", a[0], a[1]);
     return 0;
 }
+// SelectVertexShader(handle, address): the program LoadVertexShader (or the title's own push) put in the GPU's program
+// memory at address, read with the handle's attributes: a shader the host made, else the object's attribute table at
+// +0x14 (16 inputs of stream, offset, D3DVSDT type, as SelectVertexShaderDirect fills the library's own object)
 HLE_STDCALL(D3DDevice_SelectVertexShader, 2) {
-    LOG_FIRST(4, "d3d: SelectVertexShader %08X at %u is not supported", a[0], a[1]);
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
+    static std::unordered_map<uint64_t, std::shared_ptr<gpu::VertexShader>> made;
+    uint32_t handle = a[0], address = a[1] & 0xFF;
+    std::vector<uint32_t> prog = pb::ProgramFrom(address);
+    auto known = g_vs.find(handle);
+    uint32_t table[64] = {};
+    if (known == g_vs.end() && handle) std::memcpy(table, HostPtr((handle & ~1u) + 0x14), sizeof(table));
+    uint64_t key = pb::Fnv(table, sizeof(table), pb::Fnv(prog.data(), prog.size() * 4, handle * 0x9E3779B97F4A7C15ull));
+    auto& vs = made[key];
+    if (!vs) {
+        vs = std::make_shared<gpu::VertexShader>();
+        vs->handle = 0x44000001u + uint32_t(made.size()) * 2;
+        vs->program = std::move(prog);
+        vs->program_type = 0x2078;
+        if (known != g_vs.end()) {
+            vs->inputs = known->second->inputs;
+            vs->stream_stride = known->second->stream_stride;
+            vs->decl = known->second->decl;
+        } else {
+            for (int i = 0; i < 16; i++) {
+                uint32_t stream = table[i * 4], offset = table[i * 4 + 1], type = table[i * 4 + 2];
+                if (type == 0x02 || !type) continue;  // D3DVSDT_NONE
+                vs->inputs[size_t(i)] = {int(stream & 15), offset, type};
+            }
+        }
+    }
+    g_state.vs = vs;
+    g_state.vs_handle = vs->handle;
+    g_state.simple[0x1EA0 >> 2] = address;  // the program start the library pushes
+    SetDev(0x794, handle ? handle - 1 : 0);  // the device's current shader object, which its inlined code reads
     return 0;
 }
 HLE_STDCALL(D3DDevice_SetShaderConstantMode, 1) {
@@ -1078,14 +1124,6 @@ uint32_t g_push_begin = 0;
 }  // namespace
 
 // Begin/End immediate mode. Titles inline Begin and the vertex data calls, so their commands are read from the scratch buffer.
-// the push buffer executor's method handling (below), which pushes the title writes itself go through as well
-namespace {
-namespace pb {
-void Method(uint32_t m, uint32_t v);
-// the bound program read with the packed vertices of an inline array, laid out by the pushed array formats
-std::shared_ptr<gpu::VertexShader> InlineLayout(const std::shared_ptr<gpu::VertexShader>& program, uint32_t& stride);
-}  // namespace pb
-}  // namespace
 
 namespace d3d {
 namespace {
@@ -1162,6 +1200,7 @@ void Walk(uint32_t end) {
             std::memcpy(&f, &v, 4);
             ApplyVisibilityMethod(m, v);
             if (m == 0x17FC) {  // begin/end, 0 ends
+                pb::Method(m, v);   // indexed or ranged array draws the title pushed itself (drawn by pb when it has any)
                 if (v) {
                     g_im_prim = v;
                     g_im_mask = 0;
@@ -1191,6 +1230,9 @@ void Walk(uint32_t end) {
                 } else {
                     EndPrimitive();
                 }
+                continue;
+            } else if (m == 0x1800 || m == 0x1808 || m == 0x1810) {  // array elements, array ranges
+                pb::Method(m, v);
                 continue;
             } else if (m == 0x1818) {  // inline array: the vertices themselves
                 if (g_im_prim) g_inline.push_back(v);
@@ -1297,7 +1339,7 @@ bool g_prog_loaded = false;  // a vertex program came in: the stream draws with 
 std::vector<uint32_t> g_indices;
 std::vector<uint32_t> g_inline_pb;  // an inline array's dwords between begin and end
 
-uint64_t Fnv(const void* p, size_t n, uint64_t h = 1469598103934665603ull) {
+uint64_t Fnv(const void* p, size_t n, uint64_t h) {
     const uint8_t* b = static_cast<const uint8_t*>(p);
     for (size_t i = 0; i < n; i++) h = (h ^ b[i]) * 1099511628211ull;
     return h;
@@ -1337,7 +1379,7 @@ std::shared_ptr<gpu::VertexShader> InlineLayout(const std::shared_ptr<gpu::Verte
         if ((formats[i] >> 4) & 0xF) stride += FormatBytes(formats[i]);
     }
     if (!stride) return nullptr;
-    auto& vs = made[{program.get(), Fnv(formats, sizeof(formats))}];
+    auto& vs = made[{program.get(), Fnv(formats, sizeof(formats), 1469598103934665603ull)}];
     if (!vs) {
         vs = std::make_shared<gpu::VertexShader>();
         if (program) {
@@ -1359,6 +1401,15 @@ std::shared_ptr<gpu::VertexShader> InlineLayout(const std::shared_ptr<gpu::Verte
     return vs;
 }
 
+std::vector<uint32_t> ProgramFrom(uint32_t start) {
+    std::vector<uint32_t> prog;
+    for (uint32_t i = start; i < 136; i++) {
+        prog.insert(prog.end(), g_prog + i * 4, g_prog + i * 4 + 4);
+        if (g_prog[i * 4 + 3] & 1) break;  // the last instruction
+    }
+    return prog;
+}
+
 std::shared_ptr<gpu::VertexShader> Program() {
     static std::unordered_map<uint64_t, std::shared_ptr<gpu::VertexShader>> made;
     std::vector<uint32_t> prog;
@@ -1368,7 +1419,7 @@ std::shared_ptr<gpu::VertexShader> Program() {
     }
     uint32_t formats[16];
     for (int i = 0; i < 16; i++) formats[i] = Simple(0x1760 + i * 4);
-    uint64_t key = Fnv(formats, sizeof(formats), Fnv(prog.data(), prog.size() * 4));
+    uint64_t key = Fnv(formats, sizeof(formats), Fnv(prog.data(), prog.size() * 4, 1469598103934665603ull));
     auto& vs = made[key];
     if (!vs) {
         vs = std::make_shared<gpu::VertexShader>();
@@ -1404,7 +1455,7 @@ std::shared_ptr<gpu::PixelShader> Combiners() {
     d[54] = Simple(0x1E70);  // SET_SHADER_STAGE_PROGRAM
     d[55] = Simple(0x1E74);
     d[56] = Simple(0x1E78);
-    auto& ps = made[Fnv(d, sizeof(d))];
+    auto& ps = made[Fnv(d, sizeof(d), 1469598103934665603ull)];
     if (!ps) {
         ps = std::make_shared<gpu::PixelShader>();
         ps->handle = 0x50000000u + uint32_t(made.size());
@@ -1444,7 +1495,9 @@ void Bind() {
         W32(h + 4, Simple(base) & 0x0FFFFFFF);
         W32(h + 8, 0);
         W32(h + 12, Simple(base + 4));
-        W32(h + 16, w && ht ? (w - 1) | (ht - 1) << 12 | (pitch >= 64 ? pitch / 64 - 1 : 0) << 24 : 0);
+        // a swizzled texture's size is in its format (log2 dimensions), only a linear one has a size field
+        bool swizzled = (Simple(base + 4) >> 20) & 0xFF;
+        W32(h + 16, !swizzled && w && ht ? (w - 1) | (ht - 1) << 12 | (pitch >= 64 ? pitch / 64 - 1 : 0) << 24 : 0);
         g_state.textures[s] = h;
         // SET_TEXTURE_PALETTE: address (64 byte aligned), size code in bits 2-3 (256, 128, 64, 32 colours)
         uint32_t pal = Simple(base + 0x20);
@@ -1474,15 +1527,42 @@ void Bind() {
     g_state.rs[gpu::kRsStencilEnable] = Simple(0x32C);
     g_state.rs[gpu::kRsStencilFail] = Simple(0x370);
     g_state.rs[gpu::kRsFillMode] = Simple(0x38C) ? Simple(0x38C) : 0x1B02;
+    // the XDK sets the hardware front face to the opposite of D3DRS_FRONTFACE (screen y runs down), and the cull face to
+    // front when D3DRS_CULLMODE names the D3D front face's winding: the culled winding is read back the same way
     uint32_t cull = 0;
     if (Simple(0x308)) {
-        bool cw_front = Simple(0x3A0) == 0x900, back = Simple(0x39C) != 0x404;
-        cull = (cw_front == back) ? 0x901 : 0x900;  // D3DCULL_CCW / D3DCULL_CW
+        uint32_t d3d_front = (Simple(0x3A0) == 0x900 ? 0x900 : 0x901) ^ 1;
+        cull = Simple(0x39C) == 0x404 ? d3d_front : d3d_front ^ 1;  // D3DCULL_CW 0x900 / D3DCULL_CCW 0x901
     }
     g_state.rs[gpu::kRsCullMode] = cull;
+    static uint64_t seen = 0;
+    uint64_t key = uint64_t(Simple(0x308)) << 40 ^ uint64_t(Simple(0x39C)) << 20 ^ Simple(0x3A0);
+    if (key != seen && (seen = key, true))
+        LOG_FIRST(20, "d3d: push cull enable %X face %X front %X -> %X", Simple(0x308), Simple(0x39C), Simple(0x3A0), cull);
 }
 
+void EndPrimitiveBound();
+
+// a draw sets up its own program, arrays, textures and combiners: what the title had bound comes back after it
 void EndPrimitive() {
+    auto vs = g_state.vs;
+    auto ps = g_state.ps;
+    uint32_t vs_handle = g_state.vs_handle;
+    auto textures = g_state.textures;
+    auto palettes = g_state.palettes;
+    auto streams = g_state.streams;
+    auto tss = g_state.tss;
+    EndPrimitiveBound();
+    g_state.vs = vs;
+    g_state.ps = ps;
+    g_state.vs_handle = vs_handle;
+    g_state.textures = textures;
+    g_state.palettes = palettes;
+    g_state.streams = streams;
+    g_state.tss = tss;
+}
+
+void EndPrimitiveBound() {
     if (g_prim && !g_inline_pb.empty() && g_prog_loaded && g_backend) {
         SyncDeferred();
         Bind();
@@ -1503,11 +1583,34 @@ void EndPrimitive() {
     } else if (g_backend) {
         SyncDeferred();
         Bind();
+        LOG_FIRST(30, "d3d: array draw prim %u, %zu indices, start %u, arrays %08X/%08X %08X/%08X %08X/%08X", g_prim, g_indices.size(),
+                  Simple(0x1EA0), Simple(0x1720), Simple(0x1760), Simple(0x1724), Simple(0x1764), Simple(0x1728), Simple(0x1768));
         if (g_state.textures[0] | g_state.textures[1]) LOG_FIRST(20, "d3d: push buffer draw: stage modes %08X, textures %08X %08X %08X %08X, control0 %08X %08X", Simple(0x1E70),
                   g_state.textures[0], g_state.textures[1], g_state.textures[2], g_state.textures[3], Simple(0x1B0C), Simple(0x1B4C));
         uint32_t lo = *std::min_element(g_indices.begin(), g_indices.end());
         uint32_t hi = *std::max_element(g_indices.begin(), g_indices.end());
-        if (hi - lo < 0x10000) {
+        // every array must hold the vertices the indices reach, or the stream is not what the draw thinks
+        bool inside = true;
+        for (uint32_t i = 0; i < 16; i++) {
+            uint32_t f = Simple(0x1760 + i * 4);
+            if (!g_state.streams[i].vb) continue;
+            uint64_t end = uint64_t(Simple(0x1720 + i * 4) & 0x0FFFFFFF) + uint64_t(hi + 1) * (f >> 8);
+            if (end > mem::kPhysicalSize) inside = false;
+        }
+        static uint32_t last_zs = ~0u;
+        if (g_state.zs.data != last_zs && (last_zs = g_state.zs.data, true)) LOG_FIRST(40, "d3d: push draw depth surface %08X format %08X zscale %g c-38 %g %g %g", g_state.zs.data, g_state.zs.format,
+                  g_state.zscale, g_state.vsc[58][0], g_state.vsc[58][1], g_state.vsc[58][2]);
+        if (g_indices.size() > 1000) {
+            std::string idx;
+            for (size_t i = 0; i < 24 && i < g_indices.size(); i++) idx += " " + std::to_string(g_indices[i]);
+            LOG_FIRST(6, "d3d: big push draw prim %u, %zu indices %u..%u:%s", g_prim, g_indices.size(), lo, hi, idx.c_str());
+            for (uint32_t i = 0; i < 16; i++)
+                if ((Simple(0x1760 + i * 4) >> 4) & 0xF)
+                    LOG_FIRST(60, "d3d:   array %u at %08X format %08X", i, Simple(0x1720 + i * 4), Simple(0x1760 + i * 4));
+        }
+        if (!inside) {
+            LOG_FIRST(8, "d3d: push buffer draw past physical memory skipped (vertices %u..%u)", lo, hi);
+        } else if (hi - lo < 0x10000) {
             static std::vector<uint16_t> idx;
             idx.resize(g_indices.size());
             for (size_t i = 0; i < g_indices.size(); i++) idx[i] = uint16_t(g_indices[i] - lo);

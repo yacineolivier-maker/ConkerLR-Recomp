@@ -466,6 +466,23 @@ bool Assemble(const State& s, uint32_t prim, uint32_t start, uint32_t count, con
     if (!nregs) return false;
     Inputs inputs = {*layout, regs, nregs};
 
+    // every vertex the draw reads lies in memory the title has: a stream or index gone wrong draws nothing
+    for (int k = 0; k < nregs; k++) {
+        const auto& in = layout->inputs[size_t(regs[k])];
+        const auto& st = s.streams[size_t(in.stream)];
+        if (!st.vb) continue;
+        uint64_t data = mem::VirtualFromPhysical(kernel::R32(st.vb + kResData)), stride = StrideOf(s, *layout, in);
+        uint64_t first = data + in.offset + uint64_t(d.first_vertex) * stride;
+        uint64_t last = first + uint64_t(d.span - 1) * stride + 15;
+        if (last >= (1ull << 32) || !mem::IsCommitted(uint32_t(first)) || !mem::IsCommitted(uint32_t(last))) {
+            LOG_FIRST(8, "vertex: draw reading past the title's memory skipped (%08llX..%08llX): vs %08X stream %d header %08X "
+                         "common %08X data %08X stride %u first vertex %u span %u", (unsigned long long)first, (unsigned long long)last,
+                      s.vs_handle, in.stream, st.vb, kernel::R32(st.vb), kernel::R32(st.vb + kResData), uint32_t(stride),
+                      d.first_vertex, d.span);
+            return false;
+        }
+    }
+
     // the guest's own vertices when the input assembler can read every element of them
     bool raw = kRawVertices && RawReadable(s, inputs);
     if (raw) return AssembleRaw(s, inputs, d, out);

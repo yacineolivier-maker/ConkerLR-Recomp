@@ -768,6 +768,20 @@ bool D3D12Backend::CreateDevice() {
         LOGE("d3d12: no device");
         return false;
     }
+    // the debug layer's errors and warnings into the log (XBE_D3D12_DEBUG)
+    if (GetEnvironmentVariableW(L"XBE_D3D12_DEBUG", nullptr, 0)) {
+        ComPtr<ID3D12InfoQueue1> iq;
+        if (SUCCEEDED(dev_.As(&iq))) {
+            DWORD cookie = 0;
+            iq->RegisterMessageCallback(
+                [](D3D12_MESSAGE_CATEGORY, D3D12_MESSAGE_SEVERITY sev, D3D12_MESSAGE_ID id, LPCSTR desc, void*) {
+                    if (sev <= D3D12_MESSAGE_SEVERITY_WARNING) LOG_FIRST(200, "d3d12 debug %d (%d): %s", int(sev), int(id), desc);
+                },
+                D3D12_MESSAGE_CALLBACK_FLAG_NONE, nullptr, &cookie);
+        } else {
+            LOGE("d3d12: no info queue for the debug layer's messages");
+        }
+    }
     DXGI_ADAPTER_DESC1 ad{};
     if (adapter) adapter->GetDesc1(&ad);
     LOGR("D3D12 adapter: %ls", adapter ? ad.Description : L"default");
@@ -1935,7 +1949,7 @@ void KeyBlend(const State& s, PsoKey& k) {
 constexpr float kDepth24Max = 16777215.0f;  // 2^24 minus 1: a 24 bit depth buffer's units per 1.0
 
 void D3D12Backend::KeyDepthStencil(const State& s, const Assembled& a, PsoKey& k) {
-    k.zen = s.rs[kRsZEnable] != 0;
+    k.zen = s.rs[kRsZEnable] != 0 && !std::getenv("XBE_NOZ");
     if (k.zen) {
         k.zwrite = SimpleState(s, kMZWriteEnable) != 0;
         k.zfunc = SimpleState(s, kMZFunc);
@@ -1959,7 +1973,7 @@ void D3D12Backend::KeyDepthStencil(const State& s, const Assembled& a, PsoKey& k
 
 void KeyRasterizer(const State& s, const Assembled& a, PsoKey& k) {
     uint32_t cull = s.rs[kRsCullMode];
-    k.cull = cull != 0 && a.topology == Topology::Triangles;
+    k.cull = cull != 0 && a.topology == Topology::Triangles && !std::getenv("XBE_NOCULL");
     k.ccw = cull == kCullCw;  // culling clockwise leaves counter clockwise as the front
     k.fill = s.rs[kRsFillMode];
 }
@@ -2013,7 +2027,7 @@ void FillSurfaceConstants(const State& s, GuestExtent size, DrawConstants& c) {
     c.surf[2] = 1.0f / s.zscale;
     Color(s.rs[kRsFogColor], c.fog_color);
     c.misc[0] = float(SimpleState(s, kMAlphaRef) & 0xFF);
-    c.misc[1] = SimpleState(s, kMAlphaTestEnable) ? float(Cmp(SimpleState(s, kMAlphaFunc)) - 1) : kAlphaTestAlways;
+    c.misc[1] = SimpleState(s, kMAlphaTestEnable) && !std::getenv("XBE_NOALPHATEST") ? float(Cmp(SimpleState(s, kMAlphaFunc)) - 1) : kAlphaTestAlways;
     c.misc[2] = float(Cmp(s.rs[kRsShadowFunc]) - 1);
     c.misc[3] = s.rs[kRsSpecularEnable] ? 1.0f : 0.0f;
 }
@@ -2217,7 +2231,8 @@ void D3D12Backend::CaptureInputs(const State& s, const Assembled& a, const DrawC
     fprintf(cap_, "\n     verts");
     uint32_t n = 0;
     for (int r = 0; r < 16; r++) n += (a.regs >> r) & 1;
-    for (size_t v = 0; v < std::min<size_t>(4, n ? a.vertices.size() / (n * 4) : 0); v++) {
+    static const size_t kVerts = std::getenv("XBE_CAPTURE_VERTS") ? 64 : 4;
+    for (size_t v = 0; v < std::min<size_t>(kVerts, n ? a.vertices.size() / (n * 4) : 0); v++) {
         fprintf(cap_, " [");
         for (uint32_t k = 0; k < n * 4; k++) fprintf(cap_, " %g", a.vertices[v * n * 4 + k]);
         fprintf(cap_, " ]");
@@ -2551,7 +2566,8 @@ void D3D12Backend::ClearTarget(Target& t, const State& s, const ClearArgs& c, st
         if (LatchCpuWrite(t)) UploadTarget(t, s.rt);
         Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
         float col[4];
-        Color(c.color, col);
+        static const char* debug_clear = std::getenv("XBE_CLEARCOLOR");  // diagnostic: clears in a colour of one's own
+        Color(debug_clear ? uint32_t(std::strtoul(debug_clear, nullptr, 16)) : c.color, col);
         for (int i = 0; t.range != 1 && i < 3; i++) col[i] /= t.range;
         cl_->ClearRenderTargetView(Cpu(rtv_heap_.Get(), t.view, rtv_inc_), col, UINT(rs.size()), rs.data());
     }
@@ -3260,6 +3276,31 @@ void D3D12Backend::CapSave(Target& t, const char* name) {
 // the frame moves to another target: save the one it leaves
 void D3D12Backend::CapStep(const Surface& rt) {
     uint32_t d = rt.header ? mem::VirtualFromPhysical(rt.data) : 0;
+    // XBE_CAPTURE_STEPS=n,m,...: the target (and its depth) as it is before those draws too
+    static const std::vector<uint32_t> steps = [] {
+        std::vector<uint32_t> v;
+        if (const char* e = std::getenv("XBE_CAPTURE_STEPS"))
+            for (const char* p = e; *p;) {
+                v.push_back(uint32_t(std::strtoul(p, const_cast<char**>(&p), 10)));
+                if (*p == ',') p++;
+                else if (*p) break;
+            }
+        return v;
+    }();
+    if (d == cap_rt_ && std::find(steps.begin(), steps.end(), cap_i_) != steps.end()) {
+        auto it = targets_.find(TargetMapKey(cap_rt_, false));
+        if (it != targets_.end()) {
+            char name[40];
+            snprintf(name, sizeof(name), "step%04u_%08X", cap_i_, cap_rt_);
+            CapSave(it->second, name);
+        }
+        auto z = targets_.find(TargetMapKey(cap_rt_, true));
+        if (z != targets_.end()) {
+            char name[40];
+            snprintf(name, sizeof(name), "step%04u_%08X_z", cap_i_, cap_rt_);
+            CapSave(z->second, name);
+        }
+    }
     if (d == cap_rt_) return;
     auto it = targets_.find(TargetMapKey(cap_rt_, false));
     if (cap_rt_ && it != targets_.end()) {
