@@ -198,6 +198,18 @@ void SyncDeferred() {
         for (uint32_t i = 0; i < gpu::kTssBumpEnvMat00; i++) g_state.tss[s][i] = R32(kTextureState + (s * kStageStates + i) * 4);
     // the border colour is no deferred state: the inline SetTextureStageState pushes it (SET_TEXTURE_BORDER_COLOR)
     for (uint32_t s = 0; s < 4; s++) g_state.tss[s][gpu::kTssBorderColor] = g_state.simple[(0x1B24 + s * 0x40) >> 2];
+    // complex states the title's inlined setters write to the library's table (z bias, YUV, edge antialiasing, the
+    // table's own defaults such as texture factor FFFFFFFF): taken when the table changed since last read, so a push
+    // buffer's cull, depth and stencil registers still hold until the title sets them again
+    static std::array<uint32_t, gpu::kRsMax> seen = [] {
+        std::array<uint32_t, gpu::kRsMax> a;
+        a.fill(0xDEADBEEF);
+        return a;
+    }();
+    for (uint32_t i = gpu::kRsComplexFirst; i < gpu::kRsMax; i++) {
+        uint32_t v = R32(kRenderState + i * 4);
+        if (v != seen[i]) g_state.rs[i] = seen[i] = v;
+    }
 }
 
 float ZScale(const gpu::Surface& zs) {
