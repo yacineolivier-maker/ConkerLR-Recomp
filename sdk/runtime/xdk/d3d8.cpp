@@ -1616,8 +1616,11 @@ void Bind() {
 
 void EndPrimitiveBound();
 
-// a draw sets up its own program, arrays, textures and combiners: what the title had bound comes back after it
+// a draw sets up its own program, arrays, textures and combiners: what the title had bound comes back after it. So do
+// the texture modes: the library sends them again from the pixel shader's definition (device +0x790, 0x541C50) on its
+// next texture or shader change, where the cull, depth and stencil registers the buffer wrote stay as the console's do
 void EndPrimitive() {
+    uint32_t tex_modes = g_state.rs[gpu::kRsPsTextureModes];
     auto vs = g_state.vs;
     auto ps = g_state.ps;
     uint32_t vs_handle = g_state.vs_handle;
@@ -1626,6 +1629,7 @@ void EndPrimitive() {
     auto streams = g_state.streams;
     auto tss = g_state.tss;
     EndPrimitiveBound();
+    g_state.rs[gpu::kRsPsTextureModes] = tex_modes;
     g_state.vs = vs;
     g_state.ps = ps;
     g_state.vs_handle = vs_handle;
