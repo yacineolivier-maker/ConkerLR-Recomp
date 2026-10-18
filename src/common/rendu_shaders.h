@@ -145,6 +145,36 @@ float4 soft(O i) : SV_Target {
 }
 )";
 
+// netteté adaptative au contraste (CAS d'AMD, version simple) : chaque pixel renforcé selon le contraste de son voisinage,
+// sans halo là où il est déjà fort. b1 : force dans [0, 1]
+inline constexpr char kCasHlsl[] = R"(
+cbuffer C : register(b1) { float4 k; };
+Texture2D img : register(t0);
+float4 vs(uint id : SV_VertexID) : SV_Position {
+    float2 t = float2((id << 1) & 2, id & 2);
+    return float4(t * float2(2, -2) + float2(-1, 1), 0, 1);
+}
+float3 At(int2 p, int2 hi) { return img.Load(int3(clamp(p, int2(0, 0), hi), 0)).rgb; }
+float4 cas(float4 pos : SV_Position) : SV_Target {
+    uint w, h;
+    img.GetDimensions(w, h);
+    int2 hi = int2(w, h) - 1;
+    int2 p = int2(pos.xy);
+    float4 e4 = img.Load(int3(p, 0));
+    float3 a = At(p + int2(-1, -1), hi), b = At(p + int2(0, -1), hi), c = At(p + int2(1, -1), hi);
+    float3 d = At(p + int2(-1, 0), hi), e = e4.rgb, f = At(p + int2(1, 0), hi);
+    float3 g = At(p + int2(-1, 1), hi), i = At(p + int2(0, 1), hi), j = At(p + int2(1, 1), hi);
+    float3 mn = min(min(min(d, e), min(f, b)), i);
+    mn += min(mn, min(min(a, c), min(g, j)));
+    float3 mx = max(max(max(d, e), max(f, b)), i);
+    mx += max(mx, max(max(a, c), max(g, j)));
+    float3 amp = sqrt(saturate(min(mn, 2 - mx) / max(mx, 1e-4)));
+    float3 wt = amp * (-1 / lerp(8, 5, saturate(k.x)));
+    float3 o = saturate((b * wt + d * wt + f * wt + i * wt + e) / (1 + 4 * wt));
+    return float4(o, e4.a);
+}
+)";
+
 inline constexpr char kSmaaConfig[] = R"(
 cbuffer P : register(b1) { float4 metrics; };
 #define SMAA_RT_METRICS metrics

@@ -1,7 +1,8 @@
 // Rendu modernisé, en extension du moteur D3D12 : ombres douces (les textures d'ombre du jeu floutées avant d'être
 // projetées), occlusion ambiante GTAO multipliée dans la scène 3D dès qu'elle est finie (avant le flou lumineux du jeu
 // et l'interface), et SMAA sur l'image présentée. Réglages de settings.toml : ombres_douces, smaa, occlusion_ambiante,
-// occlusion_rayon (unités du monde), occlusion_force (%). F7 bascule SMAA, F8 l'occlusion, F9 les ombres douces.
+// occlusion_rayon (unités du monde), occlusion_force (%), nettete (%). F7 bascule SMAA, F8 l'occlusion, F9 les ombres
+// douces.
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -30,6 +31,7 @@ namespace game {
 bool g_smaa = true;
 bool g_occlusion = true;
 bool g_ombres_douces = true;
+uint32_t g_nettete = 40;  // %, 0 sans
 uint32_t g_occlusion_rayon = 40;   // unités du monde (le plan proche de la caméra est à 10)
 uint32_t g_occlusion_force = 100;  // %
 
@@ -60,7 +62,7 @@ struct Rt {
 };
 
 constexpr int kSoftSlots = 4;  // textures d'ombre floutées par image, au plus
-enum Slot { kAo0, kAo1, kAoOut, kEdges, kWeights, kSmaaOut, kSoft0, kSlots = kSoft0 + kSoftSlots };
+enum Slot { kAo0, kAo1, kAoOut, kEdges, kWeights, kSmaaOut, kCasOut, kSoft0, kSlots = kSoft0 + kSoftSlots };
 
 // projection de la scène, prise des constantes d'un dessin de la scène
 struct Camera {
@@ -169,7 +171,7 @@ public:
     void Present(gpu::Context& c, gpu::Target& t) override {
         if (!shadows_.empty()) Soften(c);
         if (g_occlusion && !ao_failed_ && !applied_ && scene_ == &t && draws_ >= kMinSceneDraws && cam_.ok) Occlusion(c);
-        if (g_smaa && !smaa_failed_ && !t.depth) Smaa(c, t);
+        if (!t.depth) Finish(c, t);
         NewFrame(~0ull);
     }
 
@@ -377,14 +379,50 @@ private:
         return true;
     }
 
-    // bords, poids de mélange, puis l'image mélangée recopiée dans la cible présentée
-    void Smaa(gpu::Context& c, gpu::Target& t) {
+    // SMAA puis netteté : l'image finale dans la cible présentée
+    void Finish(gpu::Context& c, gpu::Target& t) {
+        bool smaa = g_smaa && !smaa_failed_ && Smaa(c, t);
+        bool cas = g_nettete && !cas_failed_;
+        if (!cas) {
+            if (smaa) CopyBack(c, t, kSmaaOut);
+            return;
+        }
+        float k[8] = {std::min(g_nettete, 100u) / 100.0f};
+        const DXGI_FORMAT f[3] = {t.fmt, t.fmt, t.fmt};
+        bool ok;
+        if (smaa) {
+            // l'image de SMAA lue, la cible présentée écrite : pas de copie
+            To(c, kSmaaOut, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            c.Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            ID3D12Resource* const src[3] = {rt_[kSmaaOut].res.Get(), nullptr, nullptr};
+            ok = c.Pass(kCasHlsl, "cas", t.fmt, c.View(t), t.w, t.h, src, f, k, -1);
+            if (!ok) CopyBack(c, t, kSmaaOut);
+        } else {
+            ok = Ensure(c, kCasOut, t.fmt, t.w, t.h);
+            if (ok) {
+                c.Unbind();
+                c.Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                To(c, kCasOut, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                ID3D12Resource* const src[3] = {t.res.Get(), nullptr, nullptr};
+                ok = c.Pass(kCasHlsl, "cas", t.fmt, View(kCasOut), t.w, t.h, src, f, k, -1);
+                if (ok) CopyBack(c, t, kCasOut);
+            }
+        }
+        if (!ok) {
+            LOGI("rendu : netteté désactivée, son shader ou sa cible n'a pas pu être fait");
+            cas_failed_ = true;
+        }
+        LOG_FIRST(1, "rendu : netteté %u %%", g_nettete);
+    }
+
+    // bords, poids de mélange, puis l'image mélangée dans kSmaaOut ; false sans elle
+    bool Smaa(gpu::Context& c, gpu::Target& t) {
         uint32_t w = t.w, h = t.h;
         if (!Lookups(c) || !Ensure(c, kEdges, kEdgeFormat, w, h) || !Ensure(c, kWeights, kWeightFormat, w, h) ||
             !Ensure(c, kSmaaOut, t.fmt, w, h)) {
             smaa_failed_ = true;
             LOGI("rendu : SMAA désactivé, ses cibles n'ont pas pu être faites");
-            return;
+            return false;
         }
         if (smaa_src_[0].empty()) {
             std::string base = std::string(kSmaaConfig) + gpu::kSmaaHlsl + kSmaaPasses;
@@ -416,10 +454,10 @@ private:
         if (!ok) {
             LOGI("rendu : SMAA désactivé, un de ses shaders n'a pas pu être fait");
             smaa_failed_ = true;
-            return;
+            return false;
         }
-        CopyBack(c, t, kSmaaOut);
         LOG_FIRST(1, "rendu : SMAA %ux%u", w, h);
+        return true;
     }
 
     Rt rt_[kSlots];
@@ -427,7 +465,7 @@ private:
     uint32_t inc_ = 0;
     ComPtr<ID3D12Resource> area_, search_, upload_;
     std::string smaa_src_[3];
-    bool ao_failed_ = false, smaa_failed_ = false, soft_failed_ = false;
+    bool ao_failed_ = false, smaa_failed_ = false, soft_failed_ = false, cas_failed_ = false;
     std::vector<gpu::Target*> shadows_;  // textures d'ombre dessinées cette image, pas encore floutées
     // l'image en cours
     uint64_t frame_ = ~0ull;

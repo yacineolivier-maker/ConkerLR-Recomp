@@ -7,7 +7,7 @@ void StartApu();        // apu.cpp
 void AutoPad(int port, input::Pad& pad);  // autopad.cpp
 // rendu.cpp
 extern bool g_smaa, g_occlusion, g_ombres_douces;
-extern uint32_t g_occlusion_rayon, g_occlusion_force;
+extern uint32_t g_occlusion_rayon, g_occlusion_force, g_nettete;
 void InstallRendu();
 bool RenduKey(uint32_t vk);
 
@@ -39,7 +39,8 @@ const app::GameInfo app::kGame = {
                 {"smaa", &game::g_smaa, nullptr},
                 {"occlusion_ambiante", &game::g_occlusion, nullptr},
                 {"occlusion_rayon", nullptr, &game::g_occlusion_rayon},
-                {"occlusion_force", nullptr, &game::g_occlusion_force}},
+                {"occlusion_force", nullptr, &game::g_occlusion_force},
+                {"nettete", nullptr, &game::g_nettete}},
     .load = nullptr,
     .save = nullptr,
     .init = game::Init,
