@@ -418,7 +418,7 @@ std::string TexFetch(const PixelKey& k, int i) {
     std::string s;
     switch (mode) {
         // PS_TEXTUREMODES: 1 project2d, 2 project3d, 3 cubemap, 4 passthru, 5 clipplane, 6 and 7 bumpenvmap, 9 dot_st, 0xA dot_zw, 0xD dot_str_3d, 0xE dot_str_cube, 0xF dpndnt_ar, 0x10 dpndnt_gb, 0x11 dotproduct
-        case 0: return put("float4(0,0,0,1)");
+        case 0: return put("float4(0,0,0,0)");  // PROGRAM_NONE: the register holds 0
         case 1: return t.shadow ? depth("0") : put(sample2(F("%s.xy / %s.w", q, q)));
         case 2: return t.shadow ? depth(F("%s.z / %s.w", q, q)) : put(sample3(F("%s.xyz / %s.w", q, q)));
         case 3: return put(sample3(tc + ".xyz"));
@@ -864,7 +864,9 @@ std::string PixelHlsl(const PixelKey& k) {
             else if (t.kind == kTex2D) body += F("float4 t%d = tex%d.Sample(smp%d, %s);\n", i, i, i, uv.c_str());
             else if (t.kind == kTexCube && !(cube = Hooks().Cube(t, i, F("tc%d.xyz", i))).empty()) body += F("float4 t%d = %s;\n", i, cube.c_str());
             else if (t.kind) body += F("float4 t%d = tex%d.Sample(smp%d, tc%d.xyz);\n", i, i, i, i);
-            else body += F("float4 t%d = float4(1,1,1,1);\n", i);
+            // no texture: the library gives the stage texture mode NONE (0x541C50 in this build), whose register reads 0
+            // on the console, not the white a PC's D3D returns: a fade quad left on D3DTA_TEXTURE stays transparent
+            else body += F("float4 t%d = float4(0,0,0,0);\n", i);
             body += Hooks().Fetched(t, i);
             if ((k.alphakill >> i) & 1) body += F("if (t%d.a == 0) discard;\n", i);
             const char* dst = f[8] == 5 ? "tmp" : "cur";
