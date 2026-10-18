@@ -1824,7 +1824,9 @@ HLE_STDCALL(D3DDevice_RunPushBuffer, 2) {
 #if HAS_D3D_FvfShader
     if (!shader) SetDev(XDK_CDevice_VertexShader, SYM(D3D_FvfShader));
 #endif
-    if (Dev(XDK_CDevice_VertexShader)) kernel::CallGuest(ctx, kSetStateFlags, {R32(kDevicePtr), 0});
+    // XBE_NOPBSTATES: skipped, as before, to compare
+    static const bool skip = std::getenv("XBE_NOPBSTATES") != nullptr;
+    if (!skip && Dev(XDK_CDevice_VertexShader)) kernel::CallGuest(ctx, kSetStateFlags, {R32(kDevicePtr), 0});
     SetDev(XDK_CDevice_VertexShader, shader);
     Walk(Dev(kDevPush));
     uint32_t data = pb::Guest(R32(buf + 4)), size = R32(buf + 12);
