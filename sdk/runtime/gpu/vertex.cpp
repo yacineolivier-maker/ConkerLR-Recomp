@@ -466,6 +466,14 @@ bool Assemble(const State& s, uint32_t prim, uint32_t start, uint32_t count, con
     if (!nregs) return false;
     Inputs inputs = {*layout, regs, nregs};
 
+    // an element past its stream's stride reads the next vertex: worth knowing which shader asks for it
+    for (int k = 0; k < nregs; k++) {
+        const auto& in = layout->inputs[size_t(regs[k])];
+        uint32_t stride = StrideOf(s, *layout, in);
+        if (stride && in.offset + TypeBytes(in.type) > stride)
+            LOG_FIRST(20, "vertex: element v%d (type %X offset %u) past stride %u, vs %08X, stream %d", regs[k], in.type, in.offset,
+                      stride, s.vs_handle, in.stream);
+    }
     // every vertex the draw reads lies in memory the title has: a stream or index gone wrong draws nothing
     for (int k = 0; k < nregs; k++) {
         const auto& in = layout->inputs[size_t(regs[k])];

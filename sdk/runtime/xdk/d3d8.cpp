@@ -25,6 +25,8 @@ namespace pb {
 void Method(uint32_t m, uint32_t v);
 // the vertex program loaded at an address of the GPU's program memory, up to its last instruction
 std::vector<uint32_t> ProgramFrom(uint32_t start);
+// a program put in the GPU's program memory at address, as SetVertexShader loads its shader's at 0
+void LoadProgram(const std::vector<uint32_t>& prog, uint32_t address);
 uint64_t Fnv(const void* p, size_t n, uint64_t h);
 // the bound program read with the packed vertices of an inline array, laid out by the pushed array formats
 std::shared_ptr<gpu::VertexShader> InlineLayout(const std::shared_ptr<gpu::VertexShader>& program, uint32_t& stride);
@@ -898,6 +900,12 @@ HLE_STDCALL(D3DDevice_SetVertexShader, 1) {
         auto it = g_vs.find(h);
         if (it != g_vs.end()) {
             g_state.vs = it->second;
+            // the program goes to the GPU's program memory from 0 and runs from there, as the XDK loads it: push buffers
+            // run after this draw with it
+            if (!it->second->program.empty()) {
+                pb::LoadProgram(it->second->program, 0);
+                g_state.simple[0x1EA0 >> 2] = 0;
+            }
             // constants declared with the shader load when it is selected
             for (auto& [reg, v] : it->second->constants)
                 if (reg < 192) g_state.vsc[reg] = v;
@@ -1079,7 +1087,7 @@ HLE_STDCALL(D3DDevice_DrawIndexedVertices, 3) {
 // points there through a vertex buffer header for the draw. A half of the ring is written again once the draws
 // that read it are done.
 namespace {
-constexpr uint32_t kUpRing = 4u << 20, kUpHalf = kUpRing / 2;
+constexpr uint32_t kUpRing = 32u << 20, kUpHalf = kUpRing / 2;  // push buffer draws copy their vertices here too
 uint32_t g_up_ring = 0, g_up_pos = 0, g_up_header = 0, g_up_fence[2] = {};
 
 uint32_t UpVertices(const void* src, uint32_t bytes) {
@@ -1105,6 +1113,14 @@ uint32_t UpVertices(const void* src, uint32_t bytes) {
 
 void DrawUp(uint32_t prim, uint32_t count, const void* vertices, uint32_t stride) {
     if (!g_backend || !count || !stride) return;
+    if (g_state.vs && (g_state.vs_handle & 1)) {
+        uint32_t need = 0;
+        for (const auto& in : g_state.vs->inputs)
+            if (in.stream == 0) need = std::max<uint32_t>(need, in.offset + 4);
+        if (need > stride)
+            LOG_FIRST(20, "d3d: up draw prim %u count %u stride %u, layout reaches %u (vs %08X, stream stride %u)", prim, count,
+                      stride, need, g_state.vs_handle, g_state.vs->stream_stride[0]);
+    }
     SyncDeferred();
     auto stream = g_state.streams[0];
     g_state.streams[0] = {UpVertices(vertices, count * stride), stride};
@@ -1335,6 +1351,7 @@ namespace pb {
 uint32_t g_prog[136 * 4], g_prog_load = 0, g_prog_comp = 0, g_const_load = 0, g_const_comp = 0;
 uint32_t g_vb_headers = 0, g_tex_headers = 0, g_pal_headers = 0;  // 16 vertex buffer and 4 texture headers the draws point at
 uint32_t g_prim = 0;
+bool g_in_run = false;  // inside RunPushBuffer, not the title's own pushes
 bool g_prog_loaded = false;  // a vertex program came in: the stream draws with it
 std::vector<uint32_t> g_indices;
 std::vector<uint32_t> g_inline_pb;  // an inline array's dwords between begin and end
@@ -1399,6 +1416,11 @@ std::shared_ptr<gpu::VertexShader> InlineLayout(const std::shared_ptr<gpu::Verte
         vs->stream_stride[0] = off;
     }
     return vs;
+}
+
+void LoadProgram(const std::vector<uint32_t>& prog, uint32_t address) {
+    for (size_t i = 0; i < prog.size() && address * 4 + i < std::size(g_prog); i++) g_prog[address * 4 + i] = prog[i];
+    g_prog_loaded = true;
 }
 
 std::vector<uint32_t> ProgramFrom(uint32_t start) {
@@ -1600,13 +1622,18 @@ void EndPrimitiveBound() {
         static uint32_t last_zs = ~0u;
         if (g_state.zs.data != last_zs && (last_zs = g_state.zs.data, true)) LOG_FIRST(40, "d3d: push draw depth surface %08X format %08X zscale %g c-38 %g %g %g", g_state.zs.data, g_state.zs.format,
                   g_state.zscale, g_state.vsc[58][0], g_state.vsc[58][1], g_state.vsc[58][2]);
-        if (g_indices.size() > 1000) {
+        // XBE_PBLOG_AFTER=<s>: the push buffer draw logs below start that many seconds into the run
+        static const auto pb_log_start = std::chrono::steady_clock::now();
+        static const double pb_log_after = std::getenv("XBE_PBLOG_AFTER") ? std::atof(std::getenv("XBE_PBLOG_AFTER")) : 0;
+        bool pb_log = std::chrono::duration<double>(std::chrono::steady_clock::now() - pb_log_start).count() >= pb_log_after;
+        if (pb_log && g_indices.size() > 300) {
             std::string idx;
             for (size_t i = 0; i < 24 && i < g_indices.size(); i++) idx += " " + std::to_string(g_indices[i]);
-            LOG_FIRST(6, "d3d: big push draw prim %u, %zu indices %u..%u:%s", g_prim, g_indices.size(), lo, hi, idx.c_str());
+            LOG_FIRST(400, "d3d: big push draw (%s) prim %u, %zu indices %u..%u, c0 %g %g %g %g:%s", g_in_run ? "run" : "walk", g_prim,
+                      g_indices.size(), lo, hi, g_state.vsc[96][0], g_state.vsc[96][1], g_state.vsc[96][2], g_state.vsc[96][3], idx.c_str());
             for (uint32_t i = 0; i < 16; i++)
                 if ((Simple(0x1760 + i * 4) >> 4) & 0xF)
-                    LOG_FIRST(60, "d3d:   array %u at %08X format %08X", i, Simple(0x1720 + i * 4), Simple(0x1760 + i * 4));
+                    LOG_FIRST(400, "d3d:   array %u at %08X format %08X", i, Simple(0x1720 + i * 4), Simple(0x1760 + i * 4));
         }
         if (!inside) {
             LOG_FIRST(8, "d3d: push buffer draw past physical memory skipped (vertices %u..%u)", lo, hi);
@@ -1614,8 +1641,26 @@ void EndPrimitiveBound() {
             static std::vector<uint16_t> idx;
             idx.resize(g_indices.size());
             for (size_t i = 0; i < g_indices.size(); i++) idx[i] = uint16_t(g_indices[i] - lo);
+            // the vertices the draw reads, copied now: the title rewrites dynamic arrays (shadows, effects) once its
+            // own resources look idle, which these headers of ours never tell it, while the renderer reads them later
+            bool copied = true;
+            for (uint32_t i = 0; i < 16; i++) {
+                const auto& st = g_state.streams[i];
+                if (!st.vb || !st.stride) continue;
+                uint64_t bytes = uint64_t(hi - lo + 1) * st.stride;
+                if (bytes > kUpHalf) {
+                    copied = false;
+                    break;
+                }
+                uint32_t src = Guest(Simple(0x1720 + i * 4) & 0x0FFFFFFF) + lo * st.stride;
+                uint32_t up = UpVertices(HostPtr(src), uint32_t(bytes));
+                W32(st.vb + 4, R32(up + 4));
+            }
             uint32_t base = g_state.base_vertex;
-            g_state.base_vertex = lo;
+            g_state.base_vertex = copied ? 0 : lo;
+            if (!copied)  // too many to copy: read in place, as before
+                for (uint32_t i = 0; i < 16; i++)
+                    if (g_state.streams[i].vb) W32(g_state.streams[i].vb + 4, Simple(0x1720 + i * 4) & 0x0FFFFFFF);
             g_backend->Draw(g_state, g_prim, 0, uint32_t(idx.size()), reinterpret_cast<const uint8_t*>(idx.data()));
             g_state.base_vertex = base;
         } else {
@@ -1656,6 +1701,13 @@ void Method(uint32_t m, uint32_t v) {
     } else {
         if (m == 0x1E9C) g_prog_load = v, g_prog_comp = 0;
         if (m == 0x1EA4) g_const_load = v, g_const_comp = 0;
+        if (m == 0x1EA4 || m == 0x1EA0) {
+            static const auto t0 = std::chrono::steady_clock::now();
+            static const double after = std::getenv("XBE_PBLOG_AFTER") ? std::atof(std::getenv("XBE_PBLOG_AFTER")) : 1e9;
+            static int n = 0;
+            if (std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() >= after && n++ < 200)
+                LOGI("d3d: %s %u (%s)", m == 0x1EA4 ? "const load" : "prog start", v, g_in_run ? "run" : "walk");
+        }
         ApplyVisibilityMethod(m, v);
         g_state.simple[m >> 2] = v;
     }
@@ -1668,7 +1720,10 @@ void Run(uint32_t p, uint32_t end) {
         uint32_t head = R32(p);
         p += 4;
         if ((head & 3) == 1) {  // jump, old form: address | 1
-            LOG_FIRST(30, "d3d: push buffer jump %08X -> %08X (end %08X)", p - 4, Guest(head & ~3u), end);
+            static int outside = 0;
+            uint32_t to = Guest(head & ~3u);
+            if ((to < end - 0x100000 || to > end) && outside++ < 40)
+                LOGI("d3d: push buffer jump out %08X -> %08X (end %08X) %08X %08X %08X", p - 4, to, end, R32(to), R32(to + 4), R32(to + 8));
             p = Guest(head & ~3u);
             continue;
         }
@@ -1701,9 +1756,15 @@ void Run(uint32_t p, uint32_t end) {
 // fixups: size, offset into the buffer, then size bytes copied there, until a size of -1
 void ApplyFixups(uint32_t fixup, uint32_t buffer) {
     uint32_t data = Guest(R32(fixup + 4)), p = data + R32(fixup + 12), end = data + R32(fixup + 16);
+    static int logged = 0;
     while (p + 8 <= end) {
         uint32_t size = R32(p), offset = R32(p + 4);
         if (size == 0xFFFFFFFF) break;
+        static const auto t0 = std::chrono::steady_clock::now();
+        static const double after = std::getenv("XBE_PBLOG_AFTER") ? std::atof(std::getenv("XBE_PBLOG_AFTER")) : 0;
+        if (std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() >= after && logged++ < 120)
+            LOGI("d3d: fixup size %X at %X of %08X: %08X %08X %08X", size, offset, buffer, R32(p + 8), size > 4 ? R32(p + 12) : 0,
+                 size > 8 ? R32(p + 16) : 0);
         std::memcpy(HostPtr(buffer + offset), HostPtr(p + 8), size);
         p += 8 + ((size + 3) & ~3u);
     }
@@ -1726,7 +1787,9 @@ HLE_STDCALL(D3DDevice_RunPushBuffer, 2) {
     auto palettes = g_state.palettes;
     auto streams = g_state.streams;
     auto tss = g_state.tss;
+    pb::g_in_run = true;
     pb::Run(data, data + size);
+    pb::g_in_run = false;
     g_state.vs = vs;
     g_state.ps = ps;
     g_state.vs_handle = vs_handle;
