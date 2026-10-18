@@ -21,7 +21,7 @@ struct Settings {
     uint32_t render_percent = 100;   // of the output height
     uint32_t fps_cap = 60;           // 0 unlimited
     bool vsync = true;
-    uint32_t aniso = 0;              // 0 as the game asks
+    uint32_t aniso = 16;             // 0 as the game asks; else forced where the title filters across mip levels
     std::string join_ip;                   // co-op: a host past the LAN the system link search also asks
 };
 

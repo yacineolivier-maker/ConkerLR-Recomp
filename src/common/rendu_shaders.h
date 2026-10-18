@@ -118,6 +118,33 @@ float4 apply(float4 pos : SV_Position) : SV_Target {
 }
 )";
 
+// ombres douces : flou gaussien séparable de la texture d'ombre que le jeu dessine (silhouettes sur fond blanc).
+// b1 : pas en uv (x, y), rayon en texels de la cible
+inline constexpr char kSoftHlsl[] = R"(
+cbuffer S : register(b1) { float4 step; };
+Texture2D img : register(t0);
+SamplerState ls : register(s0);
+struct O { float4 p : SV_Position; float2 uv : TEXCOORD0; };
+O vs(uint id : SV_VertexID) {
+    O o;
+    o.uv = float2((id << 1) & 2, id & 2);
+    o.p = float4(o.uv * float2(2, -2) + float2(-1, 1), 0, 1);
+    return o;
+}
+// 9 prises linéaires couvrant 17 texels, poids gaussiens (sigma = rayon / 2)
+float4 soft(O i) : SV_Target {
+    float4 c = 0;
+    float n = 0;
+    [unroll] for (int k = -4; k <= 4; k++) {
+        float x = k * 2.0 * step.z / 8.0;
+        float w = exp(-0.5 * (x * x) / max(step.z * step.z / 4, 1e-3));
+        c += img.SampleLevel(ls, i.uv + step.xy * x, 0) * w;
+        n += w;
+    }
+    return c / n;
+}
+)";
+
 inline constexpr char kSmaaConfig[] = R"(
 cbuffer P : register(b1) { float4 metrics; };
 #define SMAA_RT_METRICS metrics

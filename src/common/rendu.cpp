@@ -1,6 +1,7 @@
-// Rendu modernisé, en extension du moteur D3D12 : occlusion ambiante GTAO multipliée dans la scène 3D dès qu'elle est
-// finie (avant le flou lumineux du jeu et l'interface), et SMAA sur l'image présentée. Réglages de settings.toml :
-// smaa, occlusion_ambiante, occlusion_rayon (unités du monde), occlusion_force (%). F7 bascule SMAA, F8 l'occlusion.
+// Rendu modernisé, en extension du moteur D3D12 : ombres douces (les textures d'ombre du jeu floutées avant d'être
+// projetées), occlusion ambiante GTAO multipliée dans la scène 3D dès qu'elle est finie (avant le flou lumineux du jeu
+// et l'interface), et SMAA sur l'image présentée. Réglages de settings.toml : ombres_douces, smaa, occlusion_ambiante,
+// occlusion_rayon (unités du monde), occlusion_force (%). F7 bascule SMAA, F8 l'occlusion, F9 les ombres douces.
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -16,6 +17,7 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "core/log.h"
 #include "gpu/ext.h"
@@ -27,6 +29,7 @@ namespace game {
 
 bool g_smaa = true;
 bool g_occlusion = true;
+bool g_ombres_douces = true;
 uint32_t g_occlusion_rayon = 40;   // unités du monde (le plan proche de la caméra est à 10)
 uint32_t g_occlusion_force = 100;  // %
 
@@ -42,6 +45,11 @@ constexpr uint32_t kMinSceneDraws = 40;  // dessins testés en profondeur avant 
 constexpr float kAoMaxSpan = 0.12f;      // de la hauteur de la vue, le plus grand écart des échantillons d'un pixel
 constexpr float kAoFadeStart = 2500;     // distance où l'occlusion commence à s'effacer
 constexpr float kAoFadeEnd = 8000;
+constexpr float kSoftRadius = 1.5f;      // flou des ombres, en texels de la texture d'ombre du jeu
+constexpr uint32_t kShadowMaxSize = 256;  // les textures d'ombre du jeu font 64 ou 128 de côté
+// D3DBLEND_SRCCOLOR, D3DBLEND_DESTCOLOR : les silhouettes d'ombre se multiplient sur le fond blanc de leur cible
+constexpr uint32_t kBlendSrcColor = 0x300, kBlendDestColor = 0x306;
+constexpr uint32_t kMBlendEnable = 0x304, kMSrcBlend = 0x344, kMDestBlend = 0x348;
 
 // une cible à nous : ressource, état, vue de rendu dans notre tas
 struct Rt {
@@ -51,7 +59,8 @@ struct Rt {
     uint32_t w = 0, h = 0;
 };
 
-enum Slot { kAo0, kAo1, kAoOut, kEdges, kWeights, kSmaaOut, kSlots };
+constexpr int kSoftSlots = 4;  // textures d'ombre floutées par image, au plus
+enum Slot { kAo0, kAo1, kAoOut, kEdges, kWeights, kSmaaOut, kSoft0, kSlots = kSoft0 + kSoftSlots };
 
 // projection de la scène, prise des constantes d'un dessin de la scène
 struct Camera {
@@ -102,11 +111,35 @@ public:
             if (r.res) c.Release(std::move(r.res));
             r = Rt{};
         }
+        // les cibles du moteur sont refaites : aucun pointeur vers elles ne reste
+        frame_ = 0;
         NewFrame(~0ull);
     }
 
     bool Bound(gpu::Context& c, const gpu::State& s, gpu::Target* rt, gpu::Target* ds, bool pretransformed) override {
         NewFrame(c.Presents());
+        bool rebind = false;
+        if (rt && g_ombres_douces && !soft_failed_) {
+            if (ShadowDraw(s, rt, ds)) {
+                if (std::find(shadows_.begin(), shadows_.end(), rt) == shadows_.end()) shadows_.push_back(rt);
+                return false;
+            }
+            // les ombres sont dessinées : floutées avant que la scène les lise
+            if (!shadows_.empty()) {
+                Soften(c);
+                rebind = true;
+            }
+        }
+        return Scene(c, s, rt, ds, pretransformed) || rebind;
+    }
+
+    // une petite cible sans profondeur où le jeu multiplie des silhouettes sur du blanc
+    static bool ShadowDraw(const gpu::State& s, const gpu::Target* rt, const gpu::Target* ds) {
+        return !ds && !rt->depth && rt->gw <= kShadowMaxSize && rt->gh <= kShadowMaxSize && s.simple[kMBlendEnable >> 2] &&
+               s.simple[kMSrcBlend >> 2] == kBlendSrcColor && s.simple[kMDestBlend >> 2] == kBlendDestColor;
+    }
+
+    bool Scene(gpu::Context& c, const gpu::State& s, gpu::Target* rt, gpu::Target* ds, bool pretransformed) {
         if (!g_occlusion || ao_failed_ || applied_ || !rt) return false;
         bool zen = s.rs[gpu::kRsZEnable] != 0;
         bool scene_draw = ds && zen && !pretransformed && rt->gw >= 320 && !rt->depth;
@@ -134,6 +167,7 @@ public:
     }
 
     void Present(gpu::Context& c, gpu::Target& t) override {
+        if (!shadows_.empty()) Soften(c);
         if (g_occlusion && !ao_failed_ && !applied_ && scene_ == &t && draws_ >= kMinSceneDraws && cam_.ok) Occlusion(c);
         if (g_smaa && !smaa_failed_ && !t.depth) Smaa(c, t);
         NewFrame(~0ull);
@@ -147,6 +181,40 @@ private:
         scene_ = scene_ds_ = nullptr;
         draws_ = 0;
         cam_ = Camera{};
+        shadows_.clear();
+    }
+
+    // chaque texture d'ombre dessinée, floutée en travers dans la nôtre puis en long vers elle
+    void Soften(gpu::Context& c) {
+        c.Unbind();
+        for (size_t i = 0; i < shadows_.size() && i < kSoftSlots; i++) {
+            gpu::Target& t = *shadows_[i];
+            int slot = kSoft0 + int(i);
+            if (!Ensure(c, slot, t.fmt, t.w, t.h)) {
+                soft_failed_ = true;
+                break;
+            }
+            float r = kSoftRadius * float(t.w) / float(std::max(t.gw, 1u));
+            float across[8] = {1.0f / t.w, 0, r, 0};
+            float down[8] = {0, 1.0f / t.h, r, 0};
+            const DXGI_FORMAT f[3] = {t.fmt, t.fmt, t.fmt};
+            c.Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            To(c, slot, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            ID3D12Resource* const a[3] = {t.res.Get(), nullptr, nullptr};
+            bool ok = c.Pass(kSoftHlsl, "soft", t.fmt, View(slot), t.w, t.h, a, f, across, -1);
+            To(c, slot, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            c.Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            ID3D12Resource* const b[3] = {rt_[slot].res.Get(), nullptr, nullptr};
+            ok = ok && c.Pass(kSoftHlsl, "soft", t.fmt, c.View(t), t.w, t.h, b, f, down, -1);
+            if (!ok) {
+                // la première passe n'a rien écrit dans la cible : elle reste telle que le jeu l'a dessinée
+                LOGI("rendu : ombres douces désactivées, leur shader n'a pas pu être fait");
+                soft_failed_ = true;
+                break;
+            }
+            LOG_FIRST(1, "rendu : ombres douces, texture d'ombre %ux%u floutée sur %.1f pixels", t.w, t.h, r);
+        }
+        shadows_.clear();
     }
 
     D3D12_CPU_DESCRIPTOR_HANDLE View(int i) const {
@@ -359,7 +427,8 @@ private:
     uint32_t inc_ = 0;
     ComPtr<ID3D12Resource> area_, search_, upload_;
     std::string smaa_src_[3];
-    bool ao_failed_ = false, smaa_failed_ = false;
+    bool ao_failed_ = false, smaa_failed_ = false, soft_failed_ = false;
+    std::vector<gpu::Target*> shadows_;  // textures d'ombre dessinées cette image, pas encore floutées
     // l'image en cours
     uint64_t frame_ = ~0ull;
     bool applied_ = false;
@@ -373,7 +442,7 @@ private:
 
 void InstallRendu() { gpu::SetExtension(std::make_unique<Moderne>()); }
 
-// F7 : SMAA, F8 : occlusion ambiante, le temps d'une comparaison (settings.toml garde le choix permanent)
+// F7 : SMAA, F8 : occlusion ambiante, F9 : ombres douces, le temps d'une comparaison (settings.toml garde le choix permanent)
 bool RenduKey(uint32_t vk) {
     if (vk == VK_F7) {
         g_smaa = !g_smaa;
@@ -383,6 +452,11 @@ bool RenduKey(uint32_t vk) {
     if (vk == VK_F8) {
         g_occlusion = !g_occlusion;
         LOGI("rendu : occlusion ambiante %s", g_occlusion ? "activée" : "désactivée");
+        return true;
+    }
+    if (vk == VK_F9) {
+        g_ombres_douces = !g_ombres_douces;
+        LOGI("rendu : ombres douces %s", g_ombres_douces ? "activées" : "désactivées");
         return true;
     }
     return false;

@@ -6,7 +6,7 @@ void StartHangWatch();  // hang_watch.cpp
 void StartApu();        // apu.cpp
 void AutoPad(int port, input::Pad& pad);  // autopad.cpp
 // rendu.cpp
-extern bool g_smaa, g_occlusion;
+extern bool g_smaa, g_occlusion, g_ombres_douces;
 extern uint32_t g_occlusion_rayon, g_occlusion_force;
 void InstallRendu();
 bool RenduKey(uint32_t vk);
@@ -35,7 +35,8 @@ const app::GameInfo app::kGame = {
     .missing = L"Placez le jeu dans le dossier assets : son image disque (.iso), ou default.xbe avec ses "
                L"dossiers (dvddata, media) à côté.",
     .images = {{"default.xbe", "Conker"}},
-    .options = {{"smaa", &game::g_smaa, nullptr},
+    .options = {{"ombres_douces", &game::g_ombres_douces, nullptr},
+                {"smaa", &game::g_smaa, nullptr},
                 {"occlusion_ambiante", &game::g_occlusion, nullptr},
                 {"occlusion_rayon", nullptr, &game::g_occlusion_rayon},
                 {"occlusion_force", nullptr, &game::g_occlusion_force}},
