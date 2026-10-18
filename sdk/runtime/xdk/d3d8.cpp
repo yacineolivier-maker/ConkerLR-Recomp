@@ -1748,6 +1748,9 @@ void Method(uint32_t m, uint32_t v) {
                 LOGI("d3d: %s %u (%s)", m == 0x1EA4 ? "const load" : "prog start", v, g_in_run ? "run" : "walk");
         }
         if (m == 0x2A4) g_fog_seen = true;
+        // surface and clear methods inside a recorded buffer are not followed: worth knowing if a title uses them
+        if (g_in_run && ((m >= 0x200 && m <= 0x214) || (m >= 0x1D8C && m <= 0x1D94)))
+            LOG_FIRST(16, "d3d: push buffer sets method %X = %08X (surface or clear, not followed)", m, v);
         ApplyVisibilityMethod(m, v);
         g_state.simple[m >> 2] = v;
     }

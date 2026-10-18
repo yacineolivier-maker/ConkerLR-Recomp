@@ -1844,6 +1844,19 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
         LOG_FIRST(16, "d3d12: target %08X %ux%u no longer drawn and its memory rewritten: read as a texture", d.data, d.width, d.height);
         ReleaseTarget(tit);
     }
+    // read from memory the CPU never locked, among the GPU's surfaces: likely pixels the GPU made by a path not followed
+    if (!fi.compressed && !DirtyEpoch(d.data)) {
+        static std::unordered_set<uint32_t> checked;  // once per address
+        static int told = 0;
+        if (told < 32 && checked.insert(d.data).second)
+            for (const auto& [key, tg] : targets_)
+                if (!tg.depth && tg.data != d.data && (tg.data > d.data ? tg.data - d.data : d.data - tg.data) < 0x10000) {
+                    told++;
+                    LOGI("d3d12: texture %08X %ux%u format %X read from memory never locked, beside target %08X %ux%u", d.data,
+                         d.width, d.height, d.format, tg.data, tg.gw, tg.gh);
+                    break;
+                }
+    }
     return BindGuestTexture(s, stage, d, fi, stages);
 }
 
@@ -2847,6 +2860,12 @@ void D3D12Backend::Copy(const Surface& src, const Surface& dst, uint32_t count, 
         fprintf(cap_, "%04u copy %08X %s to %08X\n", cap_i_++, src.data, from, dst.data);
     }
     // pixels the CPU made: the copy happens in memory, textures and targets pick it up from there
+    if (!src_t) {
+        // a target at the source address but of another size: its pixels are not in memory, the copy reads stale data
+        for (const auto& [key, tg] : targets_)
+            if (tg.data == mem::VirtualFromPhysical(src.data) && !tg.depth)
+                LOG_FIRST(16, "d3d12: CopyRects from %08X reads memory, a %ux%u target there was drawn by the GPU", src.data, tg.gw, tg.gh);
+    }
     if (!src_t || !src_t->drawn) {
         if (!CopySurfaceMemory(src, dst, count, src_rects, dst_points)) {
             LOG_FIRST(8, "d3d12: CopyRects %08X to %08X skipped", src.data, dst.data);
