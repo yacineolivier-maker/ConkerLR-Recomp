@@ -196,6 +196,8 @@ void SyncDeferred() {
     for (uint32_t i = gpu::kRsDeferredFirst; i < gpu::kRsComplexFirst; i++) g_state.rs[i] = R32(kRenderState + i * 4);
     for (int s = 0; s < 4; s++)
         for (uint32_t i = 0; i < gpu::kTssBumpEnvMat00; i++) g_state.tss[s][i] = R32(kTextureState + (s * kStageStates + i) * 4);
+    // the border colour is no deferred state: the inline SetTextureStageState pushes it (SET_TEXTURE_BORDER_COLOR)
+    for (uint32_t s = 0; s < 4; s++) g_state.tss[s][gpu::kTssBorderColor] = g_state.simple[(0x1B24 + s * 0x40) >> 2];
 }
 
 float ZScale(const gpu::Surface& zs) {
@@ -732,6 +734,7 @@ HLE_STDCALL(D3DDevice_SetTextureState_BumpEnv, 3) {
 }
 HLE_STDCALL(D3DDevice_SetTextureState_BorderColor, 2) {
     g_state.tss[a[0] & 3][gpu::kTssBorderColor] = a[1];
+    g_state.simple[(0x1B24 + (a[0] & 3) * 0x40) >> 2] = a[1];
     return 0;
 }
 HLE_STDCALL(D3DDevice_SetTextureState_ColorKeyColor, 2) {
@@ -1642,6 +1645,7 @@ void Bind() {
         t[gpu::kTssMipFilter] = kMin[min][1];
         t[gpu::kTssMagFilter] = mag == 1 ? 1 : 2;
         t[gpu::kTssAlphaKill] = c0 & 4 ? 4 : 0;
+        t[gpu::kTssBorderColor] = Simple(base + 0x24);
     }
     g_state.ps = Combiners();
     g_state.rs[gpu::kRsPsTextureModes] = Simple(0x1E70);

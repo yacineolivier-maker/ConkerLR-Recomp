@@ -412,14 +412,14 @@ std::string TexFetch(const PixelKey& k, int i) {
         return std::string("float4(0,0,0,1)");
     };
     auto depth = [&](const std::string& ref) {
-        return put(F("shadow(tex%d, smp%d, (%s.xy / %s.w)%s, %s, %d, i.pos.xy, texsize[%d].xy)", i, i, q, q, norm.c_str(), ref.c_str(),
+        return put(F("shadow(tex%d, smp%d, projdiv(%s.xy, %s.w)%s, %s, %d, i.pos.xy, texsize[%d].xy)", i, i, q, q, norm.c_str(), ref.c_str(),
                      t.shadow, i));
     };
     std::string s;
     switch (mode) {
         // PS_TEXTUREMODES: 1 project2d, 2 project3d, 3 cubemap, 4 passthru, 5 clipplane, 6 and 7 bumpenvmap, 9 dot_st, 0xA dot_zw, 0xD dot_str_3d, 0xE dot_str_cube, 0xF dpndnt_ar, 0x10 dpndnt_gb, 0x11 dotproduct
         case 0: return put("float4(0,0,0,0)");  // PROGRAM_NONE: the register holds 0
-        case 1: return t.shadow ? depth("0") : put(sample2(F("%s.xy / %s.w", q, q)));
+        case 1: return t.shadow ? depth("0") : put(sample2(F("projdiv(%s.xy, %s.w)", q, q)));
         case 2: return t.shadow ? depth(F("%s.z / %s.w", q, q)) : put(sample3(F("%s.xyz / %s.w", q, q)));
         case 3: return put(sample3(tc + ".xyz"));
         case 4: return put(tc);
@@ -467,6 +467,9 @@ const char* kPsTail = R"(float4 spreadtap(Texture2D t, SamplerState s, float2 uv
         }
     return c / (n * n);
 }
+// the projective divide kept finite where q reaches 0: D3D12 reads 0 for an infinite or NaN coordinate, the
+// console's texture unit a texel of the texture
+float2 projdiv(float2 p, float q) { return clamp(p / q, -65536.0, 65536.0); }
 void alphatest(float a) {
     int f = (int)misc.y;
     int v = (int)round(a * 255), r = (int)misc.x;
@@ -854,10 +857,10 @@ std::string PixelHlsl(const PixelKey& k) {
             if (f[0] <= 1) break;
             const TexInfo& t = k.tex[i];
             std::string norm = (t.rect ? F(" / texsize[%d].xy", i) : "") + F(" + texsize[%d].zw", i);
-            std::string uv = (k.proj >> i) & 1 ? F("(tc%d.xy / tc%d.w)%s", i, i, norm.c_str()) : F("tc%d.xy%s", i, norm.c_str());
+            std::string uv = (k.proj >> i) & 1 ? F("projdiv(tc%d.xy, tc%d.w)%s", i, i, norm.c_str()) : F("tc%d.xy%s", i, norm.c_str());
             std::string cube;
             if (t.shadow)
-                body += F("float4 t%d = shadow(tex%d, smp%d, (tc%d.xy / tc%d.w)%s, tc%d.z / tc%d.w, %d, i.pos.xy, texsize[%d].xy);\n", i, i,
+                body += F("float4 t%d = shadow(tex%d, smp%d, projdiv(tc%d.xy, tc%d.w)%s, tc%d.z / tc%d.w, %d, i.pos.xy, texsize[%d].xy);\n", i, i,
                           i, i, i, norm.c_str(), i, i, t.shadow, i);
             else if (t.kind == kTex2D && (t.flags & kTexWide))
                 body += F("float4 t%d = spreadtap(tex%d, smp%d, %s, spread[%d], %s);\n", i, i, i, uv.c_str(), i, Hooks().ReadScale(t).c_str());

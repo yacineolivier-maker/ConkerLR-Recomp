@@ -2291,8 +2291,8 @@ void D3D12Backend::CaptureTextures(const State& s, const DrawTextures& stages) {
         TextureDesc d;
         if (!s.textures[size_t(i)] || !Describe(s.textures[size_t(i)], d)) continue;
         bool tg = targets_.count(SizedTargetKey(d.data, Format(d.format).depth, d.width, d.height));
-        fprintf(cap_, " | t%d %08X fmt %X %ux%u%s%s", i, d.data, d.format, d.width, d.height, tg ? " target" : "",
-                res ? "" : " unbound");
+        fprintf(cap_, " | t%d %08X fmt %X %ux%u%s%s addr %u%u", i, d.data, d.format, d.width, d.height, tg ? " target" : "",
+                res ? "" : " unbound", s.tss[size_t(i)][kTssAddressU], s.tss[size_t(i)][kTssAddressV]);
         if (res && !tg && stages.info[i].kind == kTex2D && cap_seen_.insert(d.data).second) {
             cap_tex_.push_back({res, stages.sv[i].Format, d.data, d.width, d.height});
         }
