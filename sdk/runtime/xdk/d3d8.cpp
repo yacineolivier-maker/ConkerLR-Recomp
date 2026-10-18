@@ -540,10 +540,12 @@ HLE_STDCALL(D3DDevice_SetRenderTarget, 2) {
     Release(ctx, old_zs);
     g_state.rt = SurfaceOf(rt);
     g_state.zs = SurfaceOf(zs);
-    // SetRenderTarget resets the viewport to the whole target
+    // SetRenderTarget resets the viewport to the whole target, and with it the hardware clip the scissors had set
+    // (the library keeps no scissors of its own: SetScissors writes the clip, the viewport code writes it again)
     uint32_t w, h;
     gpu::SurfaceSize(g_state.rt, w, h);
     g_state.viewport = {0, 0, w, h, 0.0f, 1.0f};
+    g_state.scissor_count = 0;
     UpdateViewportConstants();
     return 0;
 }
@@ -630,7 +632,13 @@ HLE_STDCALL(D3DDevice_SetViewport, 1) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
     uint32_t v = a[0];
-    g_state.viewport = {R32(v), R32(v + 4), R32(v + 8), R32(v + 12), GF(v + 16), GF(v + 20)};
+    // the library keeps the viewport inside the render target: right and bottom stop at its edges (0x539710)
+    uint32_t tw, th;
+    gpu::SurfaceSize(g_state.rt.header ? g_state.rt : g_state.zs, tw, th);
+    uint32_t x = R32(v), y = R32(v + 4);
+    uint32_t right = uint32_t(std::min<uint64_t>(uint64_t(x) + R32(v + 8), tw));
+    uint32_t bottom = uint32_t(std::min<uint64_t>(uint64_t(y) + R32(v + 12), th));
+    g_state.viewport = {x, y, right > x ? right - x : 0, bottom > y ? bottom - y : 0, GF(v + 16), GF(v + 20)};
     g_state.scissor_count = 0;
     UpdateViewportConstants();
     return 0;
