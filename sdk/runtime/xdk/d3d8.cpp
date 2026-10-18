@@ -194,8 +194,10 @@ uint32_t NewSurface(uint32_t w, uint32_t h, uint32_t fmt, uint32_t bpp) {
 void SyncDeferred() {
     // deferred states live in the title's memory, the inline SetRenderState and SetTextureStageState write them
     for (uint32_t i = gpu::kRsDeferredFirst; i < gpu::kRsComplexFirst; i++) g_state.rs[i] = R32(kRenderState + i * 4);
+    // with the bump matrices and coordinate index: not deferred, but the library's setters (inlined by this title)
+    // store them in the same table before pushing them
     for (int s = 0; s < 4; s++)
-        for (uint32_t i = 0; i < gpu::kTssBumpEnvMat00; i++) g_state.tss[s][i] = R32(kTextureState + (s * kStageStates + i) * 4);
+        for (uint32_t i = 0; i <= gpu::kTssTexCoordIndex; i++) g_state.tss[s][i] = R32(kTextureState + (s * kStageStates + i) * 4);
     // the border colour is no deferred state: the inline SetTextureStageState pushes it (SET_TEXTURE_BORDER_COLOR)
     for (uint32_t s = 0; s < 4; s++) g_state.tss[s][gpu::kTssBorderColor] = g_state.simple[(0x1B24 + s * 0x40) >> 2];
     // complex states the title's inlined setters write to the library's table (z bias, YUV, edge antialiasing, the
@@ -741,7 +743,10 @@ HLE_STDCALL(D3DDevice_SetTextureState_TexCoordIndex, 2) {
     return 0;
 }
 HLE_STDCALL(D3DDevice_SetTextureState_BumpEnv, 3) {
-    if (a[1] >= gpu::kTssBumpEnvMat00 && a[1] <= gpu::kTssBumpEnvLOffset) g_state.tss[a[0] & 3][a[1]] = a[2];
+    if (a[1] >= gpu::kTssBumpEnvMat00 && a[1] <= gpu::kTssBumpEnvLOffset) {
+        g_state.tss[a[0] & 3][a[1]] = a[2];
+        W32(kTextureState + ((a[0] & 3) * kStageStates + a[1]) * 4, a[2]);
+    }
     return 0;
 }
 HLE_STDCALL(D3DDevice_SetTextureState_BorderColor, 2) {
@@ -1658,6 +1663,8 @@ void Bind() {
         t[gpu::kTssMagFilter] = mag == 1 ? 1 : 2;
         t[gpu::kTssAlphaKill] = c0 & 4 ? 4 : 0;
         t[gpu::kTssBorderColor] = Simple(base + 0x24);
+        // SET_TEXTURE_SET_BUMP_ENV_MAT, _SCALE, _OFFSET: the D3DTSS order from BUMPENVMAT00 (0x537AD0 pushes it so)
+        for (uint32_t k = 0; k < 6; k++) t[gpu::kTssBumpEnvMat00 + k] = Simple(base + 0x28 + k * 4);
     }
     g_state.ps = Combiners();
     g_state.rs[gpu::kRsPsTextureModes] = Simple(0x1E70);
