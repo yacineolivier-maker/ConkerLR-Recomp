@@ -990,24 +990,32 @@ HLE_STDCALL(D3DDevice_SetVertexShader, 1) {
 }
 
 HLE_FASTCALL(D3DDevice_SetVertexShaderConstant1Fast, 0) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));  // constants the title pushed itself before this call come first: they must not overwrite it
     uint32_t reg = a[0];
     if (reg < 192) std::memcpy(g_state.vsc[reg].data(), HostPtr(a[1]), 16);
     return 0;
 }
 
 HLE_FASTCALL(D3DDevice_SetVertexShaderConstant1, 0) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));  // constants the title pushed itself before this call come first: they must not overwrite it
     uint32_t reg = a[0];
     if (reg < 192) std::memcpy(g_state.vsc[reg].data(), HostPtr(a[1]), 16);
     return 0;
 }
 
 HLE_FASTCALL(D3DDevice_SetVertexShaderConstant4, 0) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));  // constants the title pushed itself before this call come first: they must not overwrite it
     uint32_t reg = a[0], src = a[1];
     for (uint32_t i = 0; i < 4 && reg + i < 192; i++) std::memcpy(g_state.vsc[reg + i].data(), HostPtr(src + i * 16), 16);
     return 0;
 }
 
 HLE_FASTCALL(D3DDevice_SetVertexShaderConstantNotInlineFast, 1) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Walk(Dev(kDevPush));  // constants the title pushed itself before this call come first: they must not overwrite it
     uint32_t reg = a[0], src = a[1], dwords = a[2];
     for (uint32_t i = 0; i < dwords / 4 && reg + i < 192; i++) std::memcpy(g_state.vsc[reg + i].data(), HostPtr(src + i * 16), 16);
     return 0;
@@ -1661,6 +1669,11 @@ void Bind() {
         t[gpu::kTssMinFilter] = kMin[min][0];
         t[gpu::kTssMipFilter] = kMin[min][1];
         t[gpu::kTssMagFilter] = mag == 1 ? 1 : 2;
+        // CONTROL0 holds D3DTSS_MAXMIPLEVEL as the minimum LOD clamp (4.8, the XDK puts the level at bit 26) and FILTER
+        // the LOD bias (signed 5.8, D3DTSS_MIPMAPLODBIAS plus the device's own), as 0x541FD0 encodes them
+        t[gpu::kTssMaxMipLevel] = (c0 >> 18 & 0xFFF) >> 8;
+        float bias = float(int32_t(filt << 19) >> 19) / 256.0f;
+        std::memcpy(&t[gpu::kTssMipLodBias], &bias, 4);
         t[gpu::kTssAlphaKill] = c0 & 4 ? 4 : 0;
         t[gpu::kTssBorderColor] = Simple(base + 0x24);
         // SET_TEXTURE_SET_BUMP_ENV_MAT, _SCALE, _OFFSET: the D3DTSS order from BUMPENVMAT00 (0x537AD0 pushes it so)
