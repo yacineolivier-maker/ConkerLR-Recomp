@@ -1343,6 +1343,13 @@ void Walk(uint32_t end) {
                                   bytes, stride);
                         layout = nullptr;
                     }
+                    // both divide it: the bound program's declaration is what the XDK sends with the shader, the formats
+                    // are often a push buffer's left over (the shadow receivers came out with half their triangles)
+                    if (layout && packed && bound_handle & 1 && bound && stride && packed != stride && bytes % stride == 0) {
+                        LOG_FIRST(20, "d3d: pushed primitive %u: formats of %u bytes and the bound declaration's %u both divide %u, "
+                                  "the declaration used", g_im_prim, packed, stride, bytes);
+                        layout = nullptr;
+                    }
                     if (layout && packed) {
                         g_state.vs = layout;
                         g_state.vs_handle = layout->handle;
