@@ -15,6 +15,7 @@ constexpr uint32_t kMemoryUnitType = SYM(XPP_MemoryUnitType);
 
 std::mutex g_ports_lock;
 bool g_poller = false;
+constexpr int kEnumerationMs = 1000;  // controllers show up this long after XInitDevices
 
 void UpdatePorts() {
     std::lock_guard<std::mutex> lock(g_ports_lock);
@@ -53,13 +54,16 @@ HLE_STDCALL(XInitDevices, 2) {
         W32(kMemoryUnitType + XDK_XPP_Changed, 0);
         W32(kMemoryUnitType + XDK_XPP_Previous, 0);
     }
-    UpdatePorts();
+    // no controller yet: the console's USB enumeration finds them a moment later, as insertions the title takes from
+    // XGetDeviceChanges once it is ready for them (a title setting up its players on those only, Conker for its sticks,
+    // lost what it set from devices already there at start)
     if (!g_poller) {
         g_poller = true;
         std::thread([] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(kEnumerationMs));
             for (;;) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(250));
                 UpdatePorts();
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
             }
         }).detach();
     }
