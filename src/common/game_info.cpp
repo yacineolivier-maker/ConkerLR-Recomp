@@ -7,7 +7,7 @@ void StartApu();        // apu.cpp
 void AutoPad(int port, input::Pad& pad);  // autopad.cpp
 // rendu.cpp
 extern bool g_smaa, g_occlusion, g_ombres_douces;
-extern uint32_t g_occlusion_rayon, g_occlusion_force, g_nettete;
+extern uint32_t g_occlusion_rayon, g_occlusion_force, g_nettete, g_ombres_taille;
 void InstallRendu();
 bool RenduKey(uint32_t vk);
 // options.cpp
@@ -39,6 +39,7 @@ const app::GameInfo app::kGame = {
                L"dossiers (dvddata, media) à côté.",
     .images = {{"default.xbe", "Conker"}},
     .options = {{"ombres_douces", &game::g_ombres_douces, nullptr},
+                {"ombres_taille", nullptr, &game::g_ombres_taille},
                 {"smaa", &game::g_smaa, nullptr},
                 {"occlusion_ambiante", &game::g_occlusion, nullptr},
                 {"occlusion_rayon", nullptr, &game::g_occlusion_rayon},

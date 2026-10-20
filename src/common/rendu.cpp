@@ -1,8 +1,8 @@
-// Rendu modernisé, en extension du moteur D3D12 : ombres douces (les textures d'ombre du jeu floutées avant d'être
-// projetées), occlusion ambiante GTAO multipliée dans la scène 3D dès qu'elle est finie (avant le flou lumineux du jeu
-// et l'interface), et SMAA sur l'image présentée. Réglages de settings.toml : ombres_douces, smaa, occlusion_ambiante,
-// occlusion_rayon (unités du monde), occlusion_force (%), nettete (%). F7 bascule SMAA, F8 l'occlusion, F9 les ombres
-// douces.
+// Rendu modernisé, en extension du moteur D3D12 : ombres douces (les textures d'ombre du jeu rendues à ombres_taille
+// pixels de côté et floutées avant d'être projetées), occlusion ambiante GTAO multipliée dans la scène 3D dès qu'elle
+// est finie (avant le flou lumineux du jeu et l'interface), et SMAA sur l'image présentée. Réglages de settings.toml :
+// ombres_douces, ombres_taille, smaa, occlusion_ambiante, occlusion_rayon (unités du monde), occlusion_force (%),
+// nettete (%). F7 bascule SMAA, F8 l'occlusion, F9 les ombres douces.
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -32,6 +32,7 @@ bool g_smaa = true;
 bool g_occlusion = true;
 bool g_ombres_douces = true;
 uint32_t g_nettete = 40;  // %, 0 sans
+uint32_t g_ombres_taille = 1024;  // côté des textures d'ombre en pixels, 0 : celui du jeu à l'échelle du rendu
 uint32_t g_occlusion_rayon = 40;   // unités du monde (le plan proche de la caméra est à 10)
 uint32_t g_occlusion_force = 100;  // %
 
@@ -49,6 +50,9 @@ constexpr float kAoFadeStart = 2500;     // distance où l'occlusion commence à
 constexpr float kAoFadeEnd = 8000;
 constexpr float kSoftRadius = 1.5f;      // flou des ombres, en texels de la texture d'ombre du jeu
 constexpr uint32_t kShadowMaxSize = 256;  // les textures d'ombre du jeu font 64 ou 128 de côté
+constexpr uint32_t kShadowMaxHd = 4096;
+// D3DFMT_R5G6B5 et D3DFMT_LIN_R5G6B5 : le format des textures d'ombre (« fmt 5 » des captures)
+constexpr uint32_t kFmtR5G6B5 = 0x05, kFmtLinR5G6B5 = 0x11;
 // D3DBLEND_SRCCOLOR, D3DBLEND_DESTCOLOR : les silhouettes d'ombre se multiplient sur le fond blanc de leur cible
 constexpr uint32_t kBlendSrcColor = 0x300, kBlendDestColor = 0x306;
 constexpr uint32_t kMBlendEnable = 0x304, kMSrcBlend = 0x344, kMDestBlend = 0x348;
@@ -133,6 +137,21 @@ public:
             }
         }
         return Scene(c, s, rt, ds, pretransformed) || rebind;
+    }
+
+    // une texture d'ombre (petite cible carrée en R5G6B5, sans profondeur) faite à g_ombres_taille de côté : les
+    // silhouettes y sont dessinées plus finement, le flou reste mesuré en texels du jeu. La taille est prise à la
+    // création de la cible
+    void MakeTarget(const gpu::Surface& s, bool depth, uint32_t gw, uint32_t gh, float& scale, DXGI_FORMAT&) override {
+        uint32_t code = (s.format >> 8) & 0xFF;
+        if (!g_ombres_taille || depth || gw != gh || gw > kShadowMaxSize || (code != kFmtR5G6B5 && code != kFmtLinR5G6B5))
+            return;
+        float hd = float(std::min(g_ombres_taille, kShadowMaxHd)) / float(gw);
+        if (hd > scale) {
+            scale = hd;
+            LOG_FIRST(4, "rendu : texture d'ombre %ux%u faite en %ux%u", gw, gh, uint32_t(std::lround(gw * hd)),
+                      uint32_t(std::lround(gh * hd)));
+        }
     }
 
     // une petite cible sans profondeur où le jeu multiplie des silhouettes sur du blanc

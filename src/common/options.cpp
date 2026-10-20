@@ -11,7 +11,7 @@ namespace game {
 
 // rendu.cpp
 extern bool g_smaa, g_occlusion, g_ombres_douces;
-extern uint32_t g_occlusion_rayon, g_occlusion_force, g_nettete;
+extern uint32_t g_occlusion_rayon, g_occlusion_force, g_nettete, g_ombres_taille;
 
 namespace {
 
@@ -56,6 +56,10 @@ void OptionsUi(double fps) {
 
     ImGui::TextUnformatted("Ombres et lumière");
     ImGui::Checkbox("Ombres douces", &g_ombres_douces);
+    // prise à la création des textures d'ombre : au prochain lancement
+    static const uint32_t kShadowSizes[] = {0, 512, 1024, 2048};
+    static const char* const kShadowSizeNames[] = {"Celle du jeu", "512", "1024", "2048"};
+    Choice("Taille des ombres (relancer)", g_ombres_taille, kShadowSizes, kShadowSizeNames, int(std::size(kShadowSizes)));
     ImGui::Checkbox("Occlusion ambiante (GTAO)", &g_occlusion);
     if (g_occlusion) {
         Slider("Portée", g_occlusion_rayon, 5, 200, "%d");
