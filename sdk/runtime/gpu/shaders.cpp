@@ -53,6 +53,7 @@ const char* kCommonTail = R"(    float4 spread[4];
     float4 mat[5];
     float4 amb;
     float4 lt[56];
+    float4 rtshift;
 };
 )";
 
@@ -377,6 +378,17 @@ std::string DotInput(uint32_t map, uint32_t src) {
     }
 }
 
+// stage i's coordinates as the title wrote them, over 0..1. The console draws half a pixel right and down of the
+// host unless a program writes positions raw: a render target is read where the console's offset puts it
+std::string TexUv(const TexInfo& t, int i, const std::string& uv) {
+    std::string n = "(" + uv + ")";
+    if (t.rect) n += F(" / texsize[%d].xy", i);
+    n += F(" + texsize[%d].zw", i);
+    if (!(t.flags & kTexTarget)) return n;
+    std::string step = "ddx(" + n + ") + ddy(" + n + ")";
+    return n + F(" + rtshift[%d] * (", i) + step + ")";
+}
+
 // texture shader stage i, per its mode
 std::string TexFetch(const PixelKey& k, int i) {
     uint32_t mode = (k.tex_modes >> (i * 5)) & 0x1F;
@@ -385,7 +397,6 @@ std::string TexFetch(const PixelKey& k, int i) {
     uint32_t dm = i == 0 ? 0 : (k.dot_mapping >> ((i - 1) * 4)) & 0xF;
     const std::string tc = F("tc%d", i);
     const char* q = tc.c_str();
-    std::string norm = (t.rect ? F(" / texsize[%d].xy", i) : "") + F(" + texsize[%d].zw", i);
     auto put = [&](const std::string& v) { return F("float4 t%d = %s;\n", i, v.c_str()); };
     // dpN, or dpNn for stage N + 1's product taken early
     auto dp = [&](int n, int coord, uint32_t map, uint32_t src) {
@@ -400,20 +411,21 @@ std::string TexFetch(const PixelKey& k, int i) {
         return c.empty() ? F("tex%d.Sample(smp%d, %s)", i, i, dir.c_str()) : c;
     };
     auto sample2 = [&](const std::string& uv) {
-        if (t.kind == kTex2D) return tex2d(F("(%s)%s", uv.c_str(), norm.c_str()));
+        if (t.kind == kTex2D) return tex2d(TexUv(t, i, uv));
         if (t.kind == kTexCube) return cube("float3(" + uv + ", 1)");
         if (t.kind == kTex3D) return F("tex%d.Sample(smp%d, float3(%s, 0))", i, i, uv.c_str());
         return std::string("float4(0,0,0,1)");
     };
     auto sample3 = [&](const std::string& uvw) {
-        if (t.kind == kTex2D) return tex2d(F("(%s).xy%s", uvw.c_str(), norm.c_str()));
+        if (t.kind == kTex2D) return tex2d(TexUv(t, i, "(" + uvw + ").xy"));
         if (t.kind == kTexCube) return cube(uvw);
         if (t.kind == kTex3D) return F("tex%d.Sample(smp%d, %s)", i, i, uvw.c_str());
         return std::string("float4(0,0,0,1)");
     };
     auto depth = [&](const std::string& ref) {
-        return put(F("shadow(tex%d, smp%d, projdiv(%s.xy, %s.w)%s, %s, %d, i.pos.xy, texsize[%d].xy)", i, i, q, q, norm.c_str(), ref.c_str(),
-                     t.shadow, i));
+        std::string uv = TexUv(t, i, F("projdiv(%s.xy, %s.w)", q, q));
+        std::string rest = F(", %s, %d, i.pos.xy, texsize[%d].xy)", ref.c_str(), t.shadow, i);
+        return put(F("shadow(tex%d, smp%d, ", i, i) + uv + rest);
     };
     std::string s;
     switch (mode) {
@@ -573,6 +585,45 @@ uint64_t Hash(const void* p, size_t n, uint64_t h) {
     return mix(seed ^ k0, uint64_t(n) ^ k1);
 }
 
+namespace {
+
+// D3DTOP and D3DTA values PixelKey::ff holds
+constexpr uint32_t kTopSelectArg1 = 2;
+constexpr uint32_t kTopSelectArg2 = 3;
+constexpr uint32_t kTopBlendTextureAlpha = 14;
+constexpr uint32_t kTopBlendTextureAlphaPm = 16;
+constexpr uint32_t kTopModulateAlphaAddColor = 18;
+constexpr uint32_t kTopModulateInvColorAddAlpha = 21;
+constexpr uint32_t kTopMultiplyAdd = 23;
+constexpr uint32_t kTopLerp = 24;
+constexpr uint32_t kTaCurrent = 1;
+constexpr uint32_t kTaTexture = 2;
+
+// args in PixelKey::ff order: arg1, arg2, arg0
+bool ReadsTexture(uint32_t op, const uint32_t* args, bool alpha) {
+    if (op == kTopBlendTextureAlpha || op == kTopBlendTextureAlphaPm) return true;
+    bool alpha_arg1_only = alpha && op >= kTopModulateAlphaAddColor && op <= kTopModulateInvColorAddAlpha;
+    bool uses_arg1 = op != kTopSelectArg2;
+    bool uses_arg2 = op != kTopSelectArg1 && !alpha_arg1_only;
+    bool uses_arg0 = op == kTopMultiplyAdd || op == kTopLerp;
+    auto texture = [](uint32_t a) { return (a & 0xF) == kTaTexture; };
+    return (uses_arg1 && texture(args[0])) || (uses_arg2 && texture(args[1])) || (uses_arg0 && texture(args[2]));
+}
+
+// the XDK's combiner builder turns a stage op that reads a missing texture into a pass of the current colour
+void PassMissingTexture(uint32_t* f) {
+    if (f[0] > 1 && ReadsTexture(f[0], f + 1, false)) {
+        f[0] = kTopSelectArg1;
+        f[1] = kTaCurrent;
+    }
+    if (f[4] > 1 && ReadsTexture(f[4], f + 5, true)) {
+        f[4] = kTopSelectArg1;
+        f[5] = kTaCurrent;
+    }
+}
+
+}  // namespace
+
 PixelKey MakePixelKey(const State& s, const TexInfo tex[4]) {
     PixelKey k;
     std::memset(&k, 0, sizeof(k));
@@ -617,10 +668,25 @@ PixelKey MakePixelKey(const State& s, const TexInfo tex[4]) {
         uint32_t v[9] = {t[kTssColorOp], t[kTssColorArg1], t[kTssColorArg2], t[kTssColorArg0], t[kTssAlphaOp],
                          t[kTssAlphaArg1],  t[kTssAlphaArg2], t[kTssAlphaArg0], t[kTssResultArg]};
         std::memcpy(k.ff[i], v, sizeof(v));
+        if (!tex[i].kind) PassMissingTexture(k.ff[i]);
         if (program || (t[kTssTextureTransformFlags] & 0x100)) k.proj |= 1u << i;  // D3DTTFF_PROJECTED
         if (t[kTssColorOp] <= 1) break;
     }
     return k;
+}
+
+constexpr uint32_t kMuxConstant = 3;
+constexpr uint32_t kViewportOffsetConstant = 59;  // c-37: constants start at c-96
+
+bool ReadsViewportOffset(const std::vector<uint32_t>& prog) {
+    for (size_t n = 0; n + 4 <= prog.size(); n += 4) {
+        Tok k{&prog[n]};
+        // an instruction reads at most one constant, through any of its operands
+        bool constant = k.f(2, 26, 2) == kMuxConstant || k.f(2, 11, 2) == kMuxConstant || k.f(3, 28, 2) == kMuxConstant;
+        bool relative = k.f(3, 1, 1);
+        if (constant && !relative && k.f(1, 13, 8) == kViewportOffsetConstant) return true;
+    }
+    return false;
 }
 
 std::string VertexProgramHlsl(const std::vector<uint32_t>& prog, uint16_t regs, uint64_t decode) {
@@ -856,12 +922,11 @@ std::string PixelHlsl(const PixelKey& k) {
             const uint32_t* f = k.ff[i];
             if (f[0] <= 1) break;
             const TexInfo& t = k.tex[i];
-            std::string norm = (t.rect ? F(" / texsize[%d].xy", i) : "") + F(" + texsize[%d].zw", i);
-            std::string uv = (k.proj >> i) & 1 ? F("projdiv(tc%d.xy, tc%d.w)%s", i, i, norm.c_str()) : F("tc%d.xy%s", i, norm.c_str());
+            std::string uv = TexUv(t, i, (k.proj >> i) & 1 ? F("projdiv(tc%d.xy, tc%d.w)", i, i) : F("tc%d.xy", i));
             std::string cube;
             if (t.shadow)
-                body += F("float4 t%d = shadow(tex%d, smp%d, projdiv(tc%d.xy, tc%d.w)%s, tc%d.z / tc%d.w, %d, i.pos.xy, texsize[%d].xy);\n", i, i,
-                          i, i, i, norm.c_str(), i, i, t.shadow, i);
+                body += F("float4 t%d = shadow(tex%d, smp%d, ", i, i, i) + TexUv(t, i, F("projdiv(tc%d.xy, tc%d.w)", i, i)) +
+                        F(", tc%d.z / tc%d.w, %d, i.pos.xy, texsize[%d].xy);\n", i, i, t.shadow, i);
             else if (t.kind == kTex2D && (t.flags & kTexWide))
                 body += F("float4 t%d = spreadtap(tex%d, smp%d, %s, spread[%d], %s);\n", i, i, i, uv.c_str(), i, Hooks().ReadScale(t).c_str());
             else if (t.kind == kTex2D) body += F("float4 t%d = tex%d.Sample(smp%d, %s);\n", i, i, i, uv.c_str());

@@ -14,10 +14,11 @@ struct TexInfo {
     uint8_t kind = kTexNone;
     uint8_t rect = 0;    // linear texture, coordinates in texels
     uint8_t shadow = 0;  // depth texture: 1 D24, 2 D16
-    uint8_t flags = 0;   // kTexWide; bits 0 and 1 are a backend extension's
+    uint8_t flags = 0;   // kTexWide, kTexTarget; bits 0 and 1 are a backend extension's
 };
 enum : uint8_t {
-    kTexWide = 4,  // an upscaled target shrunk by the pass: each tap averaged over console texels
+    kTexWide = 4,    // an upscaled target shrunk by the pass: each tap averaged over console texels
+    kTexTarget = 8,  // a render target, read where the console's pixel offset puts it (DrawConstants::rtshift)
 };
 
 struct PixelKey {
@@ -42,6 +43,8 @@ PixelKey MakePixelKey(const State& s, const TexInfo tex[4]);
 // vertex program microcode to HLSL, regs is the bit mask of v registers the draw supplies
 // decode: VertexDecode per register, 4 bits each, for elements the input assembler hands over raw
 std::string VertexProgramHlsl(const std::vector<uint32_t>& program, uint16_t regs, uint64_t decode = 0);
+// the program reads c-37, the viewport offset that carries the XDK's half pixel screen space offset
+bool ReadsViewportOffset(const std::vector<uint32_t>& program);
 // fixed function vertex state a shader is built for
 struct FixedKey {
     uint32_t light = 0;    // bit 0 lighting, 1 specular, 2 local viewer, 3 normalize, then D3DMCS 2 bits each from bit 8:
@@ -83,7 +86,7 @@ struct DrawConstants {
     float misc[4];      // alpha ref, alpha func, shadow func, specular
     float pc[18][4];    // combiner c0 c1 per stage, then final c0 c1
     float tfactor[4];
-    float texsize[4][4];
+    float texsize[4][4];  // width, height, then a uv shift only renderer copies from before rtshift set
     float bump[4][4];   // 00 01 10 11
     float bumpl[4][4];  // scale offset
     float wvp[16];      // fixed function
@@ -96,6 +99,7 @@ struct DrawConstants {
     float mat[5][4];     // material diffuse, ambient, specular, emissive, power
     float amb[4];        // D3DRS_AMBIENT
     float lt[8][7][4];   // per light: diffuse, specular, ambient, position range, direction falloff, attenuation, cos theta/2 phi/2
+    float rtshift[4];    // per kTexTarget stage: host pixels its reads move along x and y, negative up and left
 };
 
 }  // namespace gpu

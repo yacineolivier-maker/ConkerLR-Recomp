@@ -6,11 +6,13 @@
 #include <condition_variable>
 #include <deque>
 #include <map>
+#include <optional>
 #include <vector>
 
 #include "audio/audio.h"
 #include "xbe/xbe.h"
 #include "xdk/hle.h"
+#include "xdk/dsp_image.h"
 #include "xdk/layout.h"
 
 // configs written before the SDK knew the name
@@ -113,6 +115,10 @@ X86Func* Find(uint32_t guest);
 #define SYM_IDirectSoundStream_SetEG FFFFFF0C
 #define HAS_IDirectSoundStream_SetEG 0
 #endif
+#ifndef SYM_IDirectSoundBuffer_Pause
+#define SYM_IDirectSoundBuffer_Pause FFFFFF0D
+#define HAS_IDirectSoundBuffer_Pause 0
+#endif
 
 namespace {
 
@@ -123,6 +129,34 @@ constexpr uint32_t kPacketPending = 0x8000000A, kFlushed = 0x80004004;  // E_PEN
 struct Packet {
     uint32_t data, size, completed_ptr, status_ptr, context;
     uint32_t used = 0;
+};
+
+// DSMIXBIN numbers the host mixes by name
+enum MixBin : uint32_t {
+    kFrontLeft,
+    kFrontRight,
+    kCentre,
+    kSub,
+    kBackLeft,
+    kBackRight,
+    kCrosstalkFrontLeft,
+    kCrosstalkFrontRight,
+    kCrosstalkBackLeft,
+    kCrosstalkBackRight,
+    kFirstSend,  // effect sends from here up
+};
+constexpr uint32_t kBins = dsp::kBins;
+constexpr uint32_t kInvalidCall = 0x88780032u;  // DSERR_INVALIDCALL
+constexpr uint32_t kMaxChannels = 8;
+// rows of a voice's mix: its channels, then a mono 3D voice's two ears
+constexpr uint32_t kLeftEar = kMaxChannels;
+constexpr uint32_t kRightEar = kMaxChannels + 1;
+constexpr uint32_t kRows = kMaxChannels + 2;
+constexpr uint32_t kEarLength = 64;  // past the longest interaural delay, 31 samples
+
+// gain of each row on each mix bin
+struct Gains {
+    float bin[kRows][kBins];
 };
 
 struct Voice {
@@ -152,9 +186,16 @@ struct Voice {
     bool is3d = false;
     uint32_t mode = 0;  // DS3DMODE: 1 head relative, 2 disabled
     float p[3] = {}, min_dist = 1, max_dist = 1e9f;
-    // ADPCM block cache
-    int64_t block = -1;
-    int16_t decoded[65 * 8];
+    Gains gain = {};  // the last block's gains, the next block ramps from them
+    bool has_gain = false;
+    // a mono 3D voice's interaural delay in samples and its recent samples
+    float itd = 0;
+    float ear[kEarLength] = {};
+    uint32_t ear_pos = 0;
+    // ADPCM block cache: the block read last and the one read before it, a frame between two blocks reads both
+    int64_t block[2] = {-1, -1};
+    uint8_t last = 0;  // decoded[last] holds block[last]
+    int16_t decoded[2][65 * 8];
 };
 
 struct Done {
@@ -172,6 +213,19 @@ thread_local std::vector<Done> t_flushed;  // run by the STREAM call that flushe
 std::atomic<int64_t> g_pumped{0};          // the last DirectSoundDoWork, steady ms
 bool g_started = false;
 uint32_t g_ds = 0;
+// IDirectSound_SetMixBinHeadroom: the voice processor halves a bin per step, 1 for every bin but the last by default
+uint8_t g_bin_headroom[kBins] = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+                                 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0};
+struct Segment {
+    uint32_t at;
+    uint32_t bytes;
+};
+std::vector<Segment> g_effect_states;  // each effect's state segment of the downloaded image
+
+void ForgetBlocks(Voice& v) {
+    v.block[0] = -1;
+    v.block[1] = -1;
+}
 
 float Db(int32_t hundredths) { return hundredths <= -10000 ? 0.0f : std::pow(10.0f, hundredths / 2000.0f); }
 
@@ -212,17 +266,27 @@ void DecodeBlock(const uint8_t* b, int ch, int16_t* out) {
     }
 }
 
+// the decoded ADPCM block at guest address at, decoded once while it stays in the cache
+const int16_t* DecodedBlock(Voice& v, int64_t at) {
+    for (uint8_t k = 0; k < 2; k++) {
+        if (v.block[k] != at) continue;
+        v.last = k;
+        return v.decoded[k];
+    }
+    uint8_t k = v.last ^ 1;  // the slot not read last
+    DecodeBlock(static_cast<const uint8_t*>(HostPtr(uint32_t(at))), std::min<int>(v.channels, 8), v.decoded[k]);
+    v.block[k] = at;
+    v.last = k;
+    return v.decoded[k];
+}
+
 // sample of channel c at frame f of memory starting at data
 float Sample(Voice& v, uint32_t data, uint32_t f, int c) {
     c = std::min<int>(c, v.channels - 1);
     const uint8_t* p = static_cast<const uint8_t*>(HostPtr(data));
     if (v.tag == 0x69) {
         int64_t at = int64_t(data) + int64_t(f / 64) * 36 * v.channels;
-        if (at != v.block) {
-            DecodeBlock(static_cast<const uint8_t*>(HostPtr(uint32_t(at))), std::min<int>(v.channels, 8), v.decoded);
-            v.block = at;
-        }
-        return v.decoded[(f % 64) * v.channels + c] / 32768.0f;
+        return DecodedBlock(v, at)[(f % 64) * v.channels + c] / 32768.0f;
     }
     if (v.bits == 8) return (p[f * v.align + c] - 128) / 128.0f;
     int16_t s;
@@ -241,49 +305,227 @@ void Complete(Voice& v, Packet& pk, uint32_t status) {
     }
 }
 
-// gain of voice channel c on host left and right. A hardware voice holds two channels and owns a run of slots,
-// which alternate left and right.
-void Levels(Voice& v, float g[2][2]) {
-    static const uint8_t kFront[2] = {0, 1};
-    const uint8_t* bin = v.nbins ? v.bin : kFront;
-    uint32_t n = v.nbins ? v.nbins : 2, voices = (std::max<uint32_t>(v.channels, 1) - 1) / 2 + 1;
-    uint32_t per = std::max<uint32_t>(n / voices, 2), step = v.channels == 1 ? 1 : 2;
+// the console's stereo downmix of the speaker bins: centre and back pair at -3 dB, the sub dropped
+constexpr float kFold = 0.707f;
+
+// A voice with no speaker bin and no effects image plays its loudest bin on the front pair; with speaker bins the
+// crosstalk bins join their speakers and effect sends are dropped. Without the title's image nothing reads them.
+void RouteWithoutImage(const Voice& v, Gains& g) {
     bool speakers = false;
-    for (uint32_t s = 0; s < n; s++) speakers |= bin[s] < 10 && bin[s] != 3;
-    for (uint32_t c = 0; c < 2; c++) {
-        g[c][0] = g[c][1] = 0;
-        for (uint32_t s = c; c < v.channels && s < per && s < n; s += step) {
+    for (uint32_t s = 0; s < v.nbins; s++) speakers |= v.bin[s] < kFirstSend && v.bin[s] != kSub;
+    if (!v.nbins) speakers = true;
+    for (auto& row : g.bin) {
+        if (!speakers) {
+            float loudest = *std::max_element(row, row + kBins);
+            std::fill(row, row + kBins, 0.0f);
+            row[kFrontLeft] = loudest;
+            row[kFrontRight] = loudest;
+            continue;
+        }
+        row[kFrontLeft] += row[kCrosstalkFrontLeft];
+        row[kFrontRight] += row[kCrosstalkFrontRight];
+        row[kBackLeft] += row[kCrosstalkBackLeft];
+        row[kBackRight] += row[kCrosstalkBackRight];
+        std::fill(row + kCrosstalkFrontLeft, row + kBins, 0.0f);
+    }
+}
+
+// The library gives every hardware voice (two channels) a run of n / voices slots. A stereo voice plays its left
+// channel on even slots and its right on odd ones.
+uint32_t ChannelOfSlot(const Voice& v, uint32_t voice, uint32_t slot) {
+    uint32_t voice_channels = std::min<uint32_t>(v.channels - voice * 2, 2);
+    return voice * 2 + slot % voice_channels;
+}
+
+// each channel's level on each bin; the voice processor divides a bin by 2^headroom, which the image may undo
+Gains SlotGains(const Voice& v) {
+    static const uint8_t kSpeakerBins[6] = {0, 1, 2, 3, 4, 5};  // no mix bins given: the speakers in order
+    uint32_t channels = std::min<uint32_t>(v.channels, kMaxChannels);
+    uint32_t voices = (channels - 1) / 2 + 1;
+    const uint8_t* bin = v.nbins ? v.bin : kSpeakerBins;
+    uint32_t n = v.nbins ? v.nbins : std::min<uint32_t>(voices * 2, 6);
+    uint32_t per = std::max<uint32_t>(n / voices, 1);
+    bool image = dsp::Loaded();
+    Gains g = {};
+    for (uint32_t k = 0; k < voices; k++) {
+        for (uint32_t s = k * per; s < (k + 1) * per && s < n; s++) {
             uint32_t b = bin[s];
-            if (speakers && (b == 3 || b > 9)) continue;  // sub and effect sends
-            float x = Db(v.bin_mb[b]) * v.volume * v.headroom * (b == 2 ? 0.707f : 1.0f);
-            // even bins are left, odd right, 2 is the centre
-            if (!speakers || b == 2 || !(b & 1)) g[c][0] = std::max(g[c][0], x);
-            if (!speakers || b == 2 || (b & 1)) g[c][1] = std::max(g[c][1], x);
+            float level = Db(v.bin_mb[b]) * v.volume * v.headroom;
+            if (image) level = std::ldexp(level, -g_bin_headroom[b]);
+            g.bin[ChannelOfSlot(v, k, s)][b] += level;
         }
     }
-    if (!v.is3d || v.mode == 2) return;
-    bool rel = v.mode == 1;  // the position is already in listener space
-    float d[3] = {v.p[0], v.p[1], v.p[2]};
-    for (int i = 0; i < 3 && !rel; i++) d[i] -= g_listener[i];
-    float dist = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
-    float att = 1;
-    if (dist > v.min_dist && v.curve.empty()) {
-        att = v.min_dist / std::min(dist, v.max_dist);
-    } else if (dist > v.min_dist && v.max_dist > v.min_dist) {
-        // points spread evenly from min to max distance, 1.0 at min
-        float at = (std::min(dist, v.max_dist) - v.min_dist) / (v.max_dist - v.min_dist) * v.curve.size();
-        size_t i = std::min(size_t(at), v.curve.size() - 1);
-        float from = i ? v.curve[i - 1] : 1.0f;
-        att = from + (v.curve[i] - from) * (at - i);
+    return g;
+}
+
+// A 3D voice as the library's 3D pass sees it. Its levels have no left/right term: a mono voice's two ears differ
+// by the interaural delay, and on a stereo console the back crosstalk pair is silent.
+struct Place {
+    bool on = false;
+    float att = 1;      // distance, every bin
+    float front = 1;    // crosstalk front pair
+    float centre = 1;   // centre bin
+    float azimuth = 0;  // degrees, plus to the right
+    float elevation = 0;
+};
+
+float Dot(const float a[3], const float b[3]) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+
+// the library's octant estimate of the angle of along from across: 45 degrees where they are equal
+float OctantAngle(float along, float across) {
+    float a = std::fabs(along);
+    float s = std::fabs(across);
+    if (a > s) return 45 * s / a;
+    if (s > 0) return 90 - 45 * a / s;
+    return 0;
+}
+
+float Azimuth(const float d[3], const float front[3], const float right[3]) {
+    float ahead = Dot(d, front);
+    float side = Dot(d, right);
+    float deg = OctantAngle(ahead, side);
+    if (ahead < 0) deg = 180 - deg;
+    return side < 0 ? -deg : deg;
+}
+
+float Elevation(const float d[3], const float front[3], const float right[3], const float top[3]) {
+    float flat = std::hypot(Dot(d, front), Dot(d, right));
+    float up = Dot(d, top);
+    float deg = OctantAngle(flat, up);
+    return up < 0 ? -deg : deg;
+}
+
+// interaural delay in samples by azimuth in steps of 3 degrees at elevation 0, the far ear's HRTF delay
+float Itd(float azimuth) {
+    static const uint8_t kDelay[61] = {0,  2,  3,  4,  4,  5,  6,  9,  10, 11, 12, 12, 13, 14, 17, 18,
+                                       19, 20, 21, 21, 22, 23, 24, 25, 26, 28, 29, 29, 31, 30, 30, 31,
+                                       30, 28, 27, 28, 27, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15,
+                                       14, 13, 13, 12, 11, 8,  7,  6,  6,  3,  2,  2,  0};
+    constexpr int kStep = 3;
+    if (!(std::fabs(azimuth) <= 180)) return 0;
+    int deg = int(std::fabs(azimuth) + kStep / 2.0f) / kStep * kStep;
+    float delay = kDelay[deg / kStep];
+    return azimuth < 0 ? -delay : delay;
+}
+
+// A voice whose fifth bin is the centre shares the front with it below 45 degrees: 0.7071 cos^2(2a) and
+// 0.8409 cos(2a) by whole degrees of azimuth and elevation
+void ShareCentre(Place& at) {
+    constexpr float kRadiansPerDegree = 0.017453293f;
+    constexpr int kCentreLimit = 45;
+    int az = int(std::fabs(at.azimuth));
+    int el = int(std::fabs(at.elevation));
+    if (az >= kCentreLimit || el >= kCentreLimit) {
+        at.centre = 0;
+        return;
     }
+    float both = std::cos(2 * az * kRadiansPerDegree) * std::cos(2 * el * kRadiansPerDegree);
+    at.centre *= 0.7071f * both;
+    at.front *= 1 - 0.5f * both * both;
+}
+
+// distance attenuation, 1.0 inside the min distance: min / distance, or the voice's rolloff curve
+float Attenuation(const Voice& v, float dist) {
+    if (dist <= v.min_dist) return 1;
+    if (v.curve.empty()) return v.min_dist / std::min(dist, v.max_dist);
+    if (v.max_dist <= v.min_dist) return 1;
+    // points spread evenly from min to max distance, 1.0 at min
+    float at = (std::min(dist, v.max_dist) - v.min_dist) / (v.max_dist - v.min_dist) * v.curve.size();
+    size_t i = std::min(size_t(at), v.curve.size() - 1);
+    float from = i ? v.curve[i - 1] : 1.0f;
+    return from + (v.curve[i] - from) * (at - i);
+}
+
+Place Locate(const Voice& v) {
+    static const float kAhead[3] = {0, 0, 1};
+    static const float kRight[3] = {1, 0, 0};
+    static const float kUp[3] = {0, 1, 0};
+    Place at;
+    if (!v.is3d || v.mode == 2) return at;
+    at.on = true;
+    bool relative = v.mode == 1;  // the position is already in listener space
+    float d[3] = {v.p[0], v.p[1], v.p[2]};
+    for (int i = 0; i < 3 && !relative; i++) d[i] -= g_listener[i];
+    at.att = Attenuation(v, std::sqrt(Dot(d, d)));
     float right[3] = {g_top[1] * g_front[2] - g_top[2] * g_front[1], g_top[2] * g_front[0] - g_top[0] * g_front[2],
                       g_top[0] * g_front[1] - g_top[1] * g_front[0]};
-    float side = rel ? d[0] : d[0] * right[0] + d[1] * right[1] + d[2] * right[2];
-    float pan = dist > 1e-3f ? side / dist : 0.0f;
-    for (int c = 0; c < 2; c++) {
-        g[c][0] *= att * std::min(1.0f, 1.0f - pan);
-        g[c][1] *= att * std::min(1.0f, 1.0f + pan);
+    const float* front = relative ? kAhead : g_front;
+    const float* side = relative ? kRight : right;
+    const float* top = relative ? kUp : g_top;
+    at.azimuth = Azimuth(d, front, side);
+    at.elevation = Elevation(d, front, side, top);
+    at.centre = at.front;
+    if (v.nbins >= 5 && v.bin[4] == kCentre) ShareCentre(at);
+    return at;
+}
+
+float BinScale(const Place& at, uint32_t b) {
+    if (!at.on) return 1;
+    if (b == kCentre) return at.att * at.centre;
+    if (b == kCrosstalkFrontLeft || b == kCrosstalkFrontRight) return at.att * at.front;
+    if (b == kCrosstalkBackLeft || b == kCrosstalkBackRight) return 0;
+    return at.att;
+}
+
+// a mono 3D voice's crosstalk bins play its ears: the left bins the left ear, the right bins the right one
+void SplitEars(Gains& g) {
+    static const uint32_t kLeft[2] = {kCrosstalkFrontLeft, kCrosstalkBackLeft};
+    static const uint32_t kRight[2] = {kCrosstalkFrontRight, kCrosstalkBackRight};
+    for (int k = 0; k < 2; k++) {
+        std::swap(g.bin[0][kLeft[k]], g.bin[kLeftEar][kLeft[k]]);
+        std::swap(g.bin[0][kRight[k]], g.bin[kRightEar][kRight[k]]);
     }
+}
+
+Gains Levels(const Voice& v, const Place& at) {
+    Gains g = SlotGains(v);
+    for (auto& row : g.bin) {
+        for (uint32_t b = 0; b < kBins; b++) row[b] *= BinScale(at, b);
+    }
+    if (at.on && v.channels == 1) SplitEars(g);
+    if (!dsp::Loaded()) RouteWithoutImage(v, g);
+    // a sound placed at NaN goes silent alone; its NaN gain would silence the whole mix
+    for (auto& row : g.bin) {
+        for (float& gain : row) {
+            if (!std::isfinite(gain)) gain = 0;
+        }
+    }
+    return g;
+}
+
+// a row's level on one bin, ramped across the block: levels follow the game once a frame, stepped a fast turn clicks
+struct Lane {
+    uint32_t row;
+    uint32_t bin;
+    float gain;
+    float step;
+};
+
+// the levels the block can hear; one zero at both ends of its ramp adds nothing to the mix
+std::vector<Lane> AudibleLanes(const Gains& from, const Gains& to, uint32_t frames) {
+    std::vector<Lane> lanes;
+    for (uint32_t r = 0; r < kRows; r++) {
+        for (uint32_t b = 0; b < kBins; b++) {
+            float a = from.bin[r][b];
+            float z = to.bin[r][b];
+            if (a != 0 || z != 0) lanes.push_back({r, b, a, (z - a) / float(frames)});
+        }
+    }
+    return lanes;
+}
+
+// the voice's recent samples, the ear further from the sound reads them later
+void PushEar(Voice& v, float x) {
+    v.ear[v.ear_pos % kEarLength] = x;
+    v.ear_pos++;
+}
+float EarAt(const Voice& v, float delay) {
+    float back = std::max(delay, 0.0f);
+    uint32_t whole = uint32_t(back);
+    float part = back - float(whole);
+    float now = v.ear[(v.ear_pos - 1 - whole) % kEarLength];
+    float before = v.ear[(v.ear_pos - 2 - whole) % kEarLength];
+    return now + (before - now) * part;
 }
 
 // a stream goes quiet: the synch hold ends, a started one loses its pause as well
@@ -292,73 +534,127 @@ void Deactivate(Voice& v) {
     if (v.active) v.active = v.paused = v.ending = false;
 }
 
+// where a frame and the one after it are read from, for interpolation
+struct Cursor {
+    uint32_t data;
+    uint32_t f;
+    uint32_t next_data;
+    uint32_t next_f;
+};
+
+// the stream's frame at its position, none once its packets ran out
+std::optional<Cursor> StreamFrame(Voice& v) {
+    uint32_t f = uint32_t(v.pos);
+    while (!v.packets.empty() && f >= FramesOf(v, v.packets.front().size)) {
+        Packet pk = v.packets.front();
+        v.packets.pop_front();
+        pk.used = pk.size;
+        Complete(v, pk, 0);
+        v.pos -= FramesOf(v, pk.size);
+        f = uint32_t(v.pos);
+    }
+    if (v.packets.empty()) {
+        v.pos = 0;
+        if (v.ending) Deactivate(v);
+        return std::nullopt;
+    }
+    Packet& pk = v.packets.front();
+    Cursor at = {pk.data, f, pk.data, f};
+    if (f + 1 < FramesOf(v, pk.size)) {
+        at.next_f = f + 1;
+    } else if (v.packets.size() > 1) {
+        at.next_data = v.packets[1].data;
+        at.next_f = 0;
+    }
+    return at;
+}
+
+// the buffer's frame at its position, looping or stopping at the end of its region; none once stopped
+std::optional<Cursor> BufferFrame(Voice& v) {
+    uint32_t f = uint32_t(v.pos);
+    uint32_t start = v.looping ? FramesOf(v, v.loop_start) : 0;
+    uint32_t end = FramesOf(v, v.looping ? v.loop_start + v.loop_len : v.play_len);
+    if (f >= end) {
+        if (!v.looping || end <= start) {
+            v.playing = false;
+            v.pos = 0;
+            return std::nullopt;
+        }
+        v.pos = start + std::fmod(v.pos - start, double(end - start));
+        f = uint32_t(v.pos);
+    }
+    if (!v.data) return std::nullopt;
+    uint32_t base = v.data + v.play_start;
+    Cursor at = {base, f, base, f};
+    if (f + 1 < end) {
+        at.next_f = f + 1;
+    } else if (v.looping) {
+        at.next_f = start;
+    }
+    return at;
+}
+
+// adds the voice to the bins, frames of kBins interleaved, its levels ramped across the block
+void MixVoice(Voice& v, float* bins, uint32_t frames) {
+    Place at = Locate(v);
+    Gains target = Levels(v, at);
+    float itd = Itd(at.azimuth);
+    if (!v.has_gain) {
+        v.gain = target;
+        v.itd = itd;
+    }
+    v.has_gain = true;
+    std::vector<Lane> lanes = AudibleLanes(v.gain, target, frames);
+    bool ears = at.on && v.channels == 1;
+    float itd_step = (itd - v.itd) / float(frames);
+    uint32_t channels = std::min<uint32_t>(v.channels, kMaxChannels);
+    uint32_t read = ears ? 1u : 0u;  // the channels a lane plays, a bit each
+    for (const Lane& lane : lanes) {
+        if (lane.row < kMaxChannels) read |= 1u << lane.row;
+    }
+    double rate = double(v.freq ? v.freq : v.rate) / audio::kRate;
+    v.block[v.last ^ 1] = -1;  // the title may have rewritten that block's memory since the last mix
+    for (uint32_t i = 0; i < frames; i++) {
+        std::optional<Cursor> cursor = v.stream ? StreamFrame(v) : BufferFrame(v);
+        if (!cursor) break;
+        float t = float(v.pos - cursor->f);
+        float row[kRows] = {};
+        for (uint32_t c = 0; c < channels; c++) {
+            if (!(read >> c & 1)) continue;
+            float x = Sample(v, cursor->data, cursor->f, int(c));
+            row[c] = x + (Sample(v, cursor->next_data, cursor->next_f, int(c)) - x) * t;
+        }
+        if (ears) {
+            v.itd += itd_step;
+            PushEar(v, row[0]);
+            row[kLeftEar] = EarAt(v, v.itd);
+            row[kRightEar] = EarAt(v, -v.itd);
+        }
+        float* frame = bins + size_t(i) * kBins;
+        for (Lane& lane : lanes) {
+            lane.gain += lane.step;
+            frame[lane.bin] += row[lane.row] * lane.gain;
+        }
+        v.pos += rate;
+    }
+    v.gain = target;
+    v.itd = itd;
+}
+
 void Render(float* out, uint32_t frames) {
-    std::memset(out, 0, frames * 2 * sizeof(float));
+    static std::vector<float> bins;  // the output thread alone renders
+    bins.assign(size_t(frames) * kBins, 0.0f);
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     for (auto& [obj, v] : g_voices) {
         if (v.paused || v.sync || (!v.stream && !v.playing)) continue;
-        float g[2][2];
-        Levels(v, g);
-        uint32_t base = v.data + v.play_start;
-        double step = double(v.freq ? v.freq : v.rate) / audio::kRate;
-        for (uint32_t i = 0; i < frames; i++) {
-            uint32_t f = uint32_t(v.pos);
-            float a, b, a1, b1;  // this frame and the next, interpolated between
-            if (v.stream) {
-                while (!v.packets.empty() && f >= FramesOf(v, v.packets.front().size)) {
-                    Packet pk = v.packets.front();
-                    v.packets.pop_front();
-                    pk.used = pk.size;
-                    Complete(v, pk, 0);
-                    v.pos -= FramesOf(v, pk.size);
-                    f = uint32_t(v.pos);
-                }
-                if (v.packets.empty()) {
-                    v.pos = 0;
-                    if (v.ending) Deactivate(v);
-                    break;
-                }
-                Packet& pk = v.packets.front();
-                a = Sample(v, pk.data, f, 0);
-                b = Sample(v, pk.data, f, 1);
-                if (f + 1 < FramesOf(v, pk.size)) {
-                    a1 = Sample(v, pk.data, f + 1, 0);
-                    b1 = Sample(v, pk.data, f + 1, 1);
-                } else if (v.packets.size() > 1) {
-                    a1 = Sample(v, v.packets[1].data, 0, 0);
-                    b1 = Sample(v, v.packets[1].data, 0, 1);
-                } else {
-                    a1 = a;
-                    b1 = b;
-                }
-            } else {
-                uint32_t start = v.looping ? FramesOf(v, v.loop_start) : 0;
-                uint32_t end = FramesOf(v, v.looping ? v.loop_start + v.loop_len : v.play_len);
-                if (f >= end) {
-                    if (!v.looping || end <= start) {
-                        v.playing = false;
-                        v.pos = 0;
-                        break;
-                    }
-                    v.pos = start + std::fmod(v.pos - start, double(end - start));
-                    f = uint32_t(v.pos);
-                }
-                if (!v.data) break;
-                a = Sample(v, base, f, 0);
-                b = Sample(v, base, f, 1);
-                uint32_t next = f + 1 < end ? f + 1 : v.looping ? start : f;
-                a1 = Sample(v, base, next, 0);
-                b1 = Sample(v, base, next, 1);
-            }
-            float t = float(v.pos - f);
-            a += (a1 - a) * t;
-            b += (b1 - b) * t;
-            out[i * 2] += a * g[0][0] + b * g[1][0];
-            out[i * 2 + 1] += a * g[0][1] + b * g[1][1];
-            v.pos += step;
-        }
+        MixVoice(v, bins.data(), frames);
     }
-    for (uint32_t i = 0; i < frames * 2; i++) out[i] = std::clamp(out[i], -1.0f, 1.0f);
+    if (dsp::Loaded()) dsp::Run(bins.data(), frames);
+    for (uint32_t i = 0; i < frames; i++) {
+        const float* b = &bins[size_t(i) * kBins];
+        out[i * 2] = std::clamp(b[kFrontLeft] + kFold * (b[kCentre] + b[kBackLeft]), -1.0f, 1.0f);
+        out[i * 2 + 1] = std::clamp(b[kFrontRight] + kFold * (b[kCentre] + b[kBackRight]), -1.0f, 1.0f);
+    }
 }
 
 int64_t NowMs() {
@@ -447,6 +743,14 @@ uint32_t NewBuffer(uint32_t desc, uint32_t out) {
     return 0;
 }
 
+// the effect's state segment when offset and size lie inside it, else 0
+uint32_t EffectState(uint32_t effect, uint32_t offset, uint32_t size) {
+    if (effect >= g_effect_states.size()) return 0;
+    const Segment& state = g_effect_states[effect];
+    if (offset > state.bytes || size > state.bytes - offset) return 0;
+    return state.at;
+}
+
 float F32(uint32_t v) {
     float f;
     std::memcpy(&f, &v, 4);
@@ -469,7 +773,7 @@ static void AuditExports() {
         SYM(IDirectSound_DownloadEffectsImage), SYM(IDirectSound_GetEffectData), SYM(IDirectSound_CommitEffectData),
         SYM(IDirectSound_GetOutputLevels), SYM(IDirectSoundBuffer_SetPlayRegion), SYM(IDirectSoundBuffer_SetAllParameters),
         SYM(IDirectSoundBuffer_SetFormat), SYM(IDirectSoundBuffer_SetOutputBuffer), SYM(IDirectSoundBuffer_SetRolloffCurve),
-        SYM(IDirectSoundBuffer_StopEx),
+        SYM(IDirectSoundBuffer_StopEx), SYM(IDirectSoundBuffer_Pause), SYM(IDirectSoundBuffer_SetEG),
         SYM(XAudioDownloadEffectsImage), SYM(DirectSoundCreateBuffer), SYM(IDirectSound_CreateSoundBuffer),
         SYM(IDirectSoundBuffer_Release), SYM(IDirectSoundBuffer_Unlock), SYM(IDirectSoundBuffer_SetBufferData),
         SYM(IDirectSoundBuffer_Play), SYM(IDirectSoundBuffer_Stop), SYM(IDirectSoundBuffer_SetLoopRegion),
@@ -524,15 +828,38 @@ HLE_STDCALL(IDirectSound_GetSpeakerConfig, 2) {
     W32(a[1], 0);  // DSSPEAKER_STEREO
     return 0;
 }
-HLE_STDCALL(IDirectSound_SetEffectData, 6) { return 0; }
+// (this, effect, offset, data, size, flags): writes the effect's state
+HLE_STDCALL(IDirectSound_SetEffectData, 6) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    uint32_t state = EffectState(a[1], a[2], a[4]);
+    if (!state || !a[3]) return kInvalidCall;
+    std::memcpy(HostPtr(state + a[2]), HostPtr(a[3]), a[4]);
+    return 0;
+}
 HLE_STDCALL(IDirectSound_EnableHeadphones, 2) { return 0; }
-HLE_STDCALL(IDirectSound_SetMixBinHeadroom, 3) { return 0; }
+// (this, mix bin, headroom)
+HLE_STDCALL(IDirectSound_SetMixBinHeadroom, 3) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    if (a[1] < kBins) g_bin_headroom[a[1]] = a[2] & 7;
+    return 0;
+}
 HLE_STDCALL(IDirectSound_CommitDeferredSettings, 1) { return 0; }
 HLE_STDCALL(IDirectSound_SetDopplerFactor, 3) { return 0; }
 HLE_STDCALL(IDirectSound_SetRolloffFactor, 3) { return 0; }
 HLE_STDCALL(IDirectSound_SetDistanceFactor, 3) { return 0; }
 HLE_STDCALL(IDirectSound_SetVelocity, 5) { return 0; }
-HLE_STDCALL(IDirectSound_SetI3DL2Listener, 3) { return 0; }
+// (this, DSI3DL2LISTENER, apply): room, room HF, reflections and reverb are integers
+HLE_STDCALL(IDirectSound_SetI3DL2Listener, 3) {
+    float p[12];
+    for (int i = 0; i < 12; i++) {
+        uint32_t v = R32(a[1] + i * 4);
+        bool integer = i < 2 || i == 5 || i == 7;
+        p[i] = integer ? float(int32_t(v)) : F32(v);
+    }
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    dsp::SetListener(p);
+    return 0;
+}
 HLE_STDCALL(IDirectSound_SetPosition, 5) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     for (int i = 0; i < 3; i++) g_listener[i] = F32(a[1 + i]);
@@ -564,9 +891,11 @@ HLE_STDCALL(IDirectSound_SynchPlayback, 1) {
     return 0;
 }
 
-// Effects run on the console's DSP and are not reproduced.
-// the descriptor keeps the image's effect list so the title finds its indices, every segment points at zeroed memory
-static uint32_t EffectsDesc(const std::vector<uint8_t>& img, const char* name) {
+// The descriptor keeps the image's effect list so the title finds its indices. State segments hold the image's plain
+// state, which the host effects read (xdk/dsp_image.cpp); code, Y memory and scratch point at zeroed memory.
+// loc: DSEFFECTIMAGELOC, the I3DL2 reverb's index first
+static uint32_t EffectsDesc(const std::vector<uint8_t>& img, const char* name, uint32_t loc) {
+    constexpr int kStateSegment = 1;
     XDK_REQUIRE("dsound", XDK_KEY(EffectsImage_Skip0), XDK_KEY(EffectsImage_Skip1), XDK_KEY(EffectsImage_Desc));
     auto u32 = [&](size_t o) { uint32_t v = 0; if (o + 4 <= img.size()) std::memcpy(&v, &img[o], 4); return v; };
     size_t t = XDK_EffectsImage_Desc + size_t(u32(XDK_EffectsImage_Skip0) + u32(XDK_EffectsImage_Skip1)) * 4;
@@ -575,6 +904,7 @@ static uint32_t EffectsDesc(const std::vector<uint8_t>& img, const char* name) {
     uint32_t desc = mem::AllocSystem(8 + std::max(count, 1u) * 32);
     W32(desc, count);
     W32(desc + 4, u32(t + 4));
+    std::vector<Segment> states;
     for (uint32_t i = 0; i < count; i++) {
         size_t m = t + 8 + i * 32;
         uint32_t d = desc + 8 + i * 32;
@@ -582,10 +912,20 @@ static uint32_t EffectsDesc(const std::vector<uint8_t>& img, const char* name) {
             uint32_t size = u32(m + k * 8 + 4);
             uint32_t seg = mem::AllocSystem(std::max(size, 0x40u));
             std::memset(HostPtr(seg), 0, std::max(size, 0x40u));
+            uint32_t at = u32(m + k * 8);
+            bool inside = at <= img.size() && size <= img.size() - at;
+            if (k == kStateSegment && inside) std::memcpy(HostPtr(seg), img.data() + at, size);
+            if (k == kStateSegment) states.push_back({seg, size});
             W32(d + k * 8, seg);
             W32(d + k * 8 + 4, size);
         }
     }
+    int32_t reverb = loc ? int32_t(R32(loc)) : -1;
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    g_effect_states = states;
+    std::vector<uint32_t> addresses;
+    for (const Segment& s : states) addresses.push_back(s.at);
+    dsp::Load(img, t, addresses, reverb);
     return desc;
 }
 
@@ -598,7 +938,7 @@ HLE_STDCALL(XAudioDownloadEffectsImage, 4) {
     } else {
         ReadGameFile(name, img);
     }
-    uint32_t desc = EffectsDesc(img, name.c_str());
+    uint32_t desc = EffectsDesc(img, name.c_str(), a[1]);
     if (a[3]) W32(a[3], desc);
     return 0;
 }
@@ -606,13 +946,16 @@ HLE_STDCALL(XAudioDownloadEffectsImage, 4) {
 // (this, image, size, location, descriptor out): the title loaded the image itself
 HLE_STDCALL(IDirectSound_DownloadEffectsImage, 5) {
     std::vector<uint8_t> img(static_cast<uint8_t*>(HostPtr(a[1])), static_cast<uint8_t*>(HostPtr(a[1])) + a[2]);
-    uint32_t desc = EffectsDesc(img, "from memory");
+    uint32_t desc = EffectsDesc(img, "from memory", a[3]);
     if (a[4]) W32(a[4], desc);
     return 0;
 }
-// (this, effect, offset, data, size): SetEffectData keeps nothing, so effect memory reads as zero
+// (this, effect, offset, data, size): reads the effect's state
 HLE_STDCALL(IDirectSound_GetEffectData, 5) {
-    if (a[3]) std::memset(HostPtr(a[3]), 0, a[4]);
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    uint32_t state = EffectState(a[1], a[2], a[4]);
+    if (!state || !a[3]) return kInvalidCall;
+    std::memcpy(HostPtr(a[3]), HostPtr(state + a[2]), a[4]);
     return 0;
 }
 HLE_STDCALL(IDirectSound_CommitEffectData, 1) { return 0; }
@@ -657,10 +1000,11 @@ BUFFER(SetBufferData, 3) {
     v.bytes = v.play_len = v.loop_len = a[2];
     v.play_start = v.loop_start = 0;
     v.pos = 0;
-    v.block = -1;
+    ForgetBlocks(v);
     return 0;
 }
 BUFFER(Play, 4) {
+    v.has_gain = false;  // a new sound does not ramp from the last one's levels
     v.playing = true;
     v.looping = a[3] & 1;
     if (a[3] & 2) v.pos = 0;
@@ -676,6 +1020,14 @@ BUFFER(StopEx, 4) {
     v.playing = false;
     return 0;
 }
+// (this, flags): 0 resumes, 1 pauses, 2 holds until IDirectSound_SynchPlayback
+BUFFER(Pause, 2) {
+    v.paused = a[1] == 1;
+    v.sync = a[1] == 2;
+    return 0;
+}
+// envelopes are not played
+BUFFER(SetEG, 2) { return 0; }
 // (this, start, length) in bytes, 0 length plays to the end. The loop becomes the whole region.
 BUFFER(SetPlayRegion, 3) {
     if (a[1] > v.bytes || a[2] > v.bytes - a[1]) return 0x88780032u;  // DSERR_INVALIDCALL
@@ -683,7 +1035,7 @@ BUFFER(SetPlayRegion, 3) {
     v.play_len = v.loop_len = a[2] ? a[2] : v.bytes - a[1];
     v.loop_start = 0;
     v.pos = 0;
-    v.block = -1;
+    ForgetBlocks(v);
     return 0;
 }
 BUFFER(SetLoopRegion, 3) {
@@ -771,7 +1123,7 @@ BUFFER(SetOutputBuffer, 2) { return 0; }  // the voice keeps its own mix bins
 BUFFER(SetFormat, 2) {
     ReadFormat(v, a[1]);
     v.freq = 0;
-    v.block = -1;
+    ForgetBlocks(v);
     return 0;
 }
 
@@ -865,7 +1217,6 @@ HLE_STDCALL(IDirectSoundStream_GetVoiceProperties, 2) {
 }
 // low frequency oscillators and envelopes are not played
 HLE_STDCALL(IDirectSoundBuffer_SetLFO, 2) { return 0; }
-HLE_STDCALL(IDirectSoundBuffer_SetEG, 2) { return 0; }
 HLE_STDCALL(IDirectSoundStream_SetLFO, 2) { return 0; }
 // a stream sent into another buffer (a submix) plays to the mix bins it has instead
 HLE_STDCALL(IDirectSoundStream_SetOutputBuffer, 2) { return 0; }
@@ -907,7 +1258,7 @@ STREAM(SetFormat, 2) {
     FlushStream(v);
     ReadFormat(v, a[1]);
     v.freq = 0;  // the XDK sets the pitch back to the new format's own rate
-    v.block = -1;
+    ForgetBlocks(v);
     return 0;
 }
 STREAM(Release, 1) {
@@ -937,6 +1288,7 @@ STREAM(Process, 3) {
     if (pk.completed_ptr) W32(pk.completed_ptr, 0);
     if (pk.status_ptr) W32(pk.status_ptr, kPacketPending);
     v.packets.push_back(pk);
+    if (!v.active) v.has_gain = false;  // after going quiet a stream starts its levels fresh
     v.active = true;
     v.ending = false;
     return 0;

@@ -35,12 +35,22 @@ void StartOutput(std::function<void(float*, uint32_t)> render) {
             return;
         }
         voice->Start();
-        constexpr uint32_t kFrames = kRate / 100, kSlots = 4;
+        constexpr uint32_t kFrames = kRate / 100;
+        constexpr uint32_t kMinQueued = 3;
+        constexpr uint32_t kMaxQueued = 10;
+        // one slot more than can be queued, so the one rendered is never one XAudio2 still reads
+        constexpr uint32_t kSlots = kMaxQueued + 1;
         std::vector<float> bufs(kSlots * kFrames * 2);
+        uint32_t depth = kMinQueued;
         for (uint32_t n = 0;;) {
             XAUDIO2_VOICE_STATE st;
             voice->GetState(&st, XAUDIO2_VOICE_NOSAMPLESPLAYED);
-            if (st.BuffersQueued >= 3) {
+            // a starved voice crackles: queue one buffer more each time, up to kMaxQueued
+            if (n && !st.BuffersQueued && depth < kMaxQueued) {
+                depth++;
+                LOGI("audio: output starved, queueing %u ms", depth * 10);
+            }
+            if (st.BuffersQueued >= depth) {
                 Sleep(2);
                 continue;
             }
