@@ -1726,6 +1726,9 @@ bool D3D12Backend::CreateTexture(Tex& tx, const TextureDesc& d, const FormatInfo
     uint32_t w = d.width;
     uint32_t h = d.height;
     tx.levels = d.levels;
+    if (d.depth > 1)
+        LOG_FIRST(20, "d3d12: volume texture %08X format %X %ux%ux%u, %u levels", d.data, d.format, d.width, d.height, d.depth,
+                  d.levels);
     if (bc && ((w & 3) || (h & 3))) {
         w = (w + 3) & ~3u;
         h = (h + 3) & ~3u;

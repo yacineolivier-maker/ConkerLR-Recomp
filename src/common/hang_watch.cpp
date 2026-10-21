@@ -64,7 +64,14 @@ void StartHangWatch() {
                 std::string name = "memdump_" + std::to_string(t) + ".bin";
                 if (FILE* f = std::fopen(name.c_str(), "wb")) {
                     static const uint8_t zero[0x1000] = {};
-                    for (uint32_t a = 0x10000; a < 0x900000; a += 0x1000)
+                    // XBE_MEMDUMP_RANGE=<adresse hex>:<taille hex> : une autre plage (une texture, par exemple)
+                    uint32_t lo = 0x10000, hi = 0x900000;
+                    if (const char* r = std::getenv("XBE_MEMDUMP_RANGE")) {
+                        char* e = nullptr;
+                        lo = uint32_t(std::strtoul(r, &e, 16)) & ~0xFFFu;
+                        hi = lo + ((e && *e == ':' ? uint32_t(std::strtoul(e + 1, nullptr, 16)) : 0x100000) + 0xFFF & ~0xFFFu);
+                    }
+                    for (uint32_t a = lo; a < hi; a += 0x1000)
                         std::fwrite(mem::IsCommitted(a) ? kernel::HostPtr(a) : zero, 1, 0x1000, f);
                     std::fclose(f);
                     LOGI("mémoire écrite dans %s", name.c_str());

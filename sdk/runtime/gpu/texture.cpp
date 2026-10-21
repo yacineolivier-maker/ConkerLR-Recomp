@@ -334,7 +334,20 @@ void DecodeLevel(const TextureDesc& d, uint32_t level, uint32_t face, const uint
     if (f.compressed) {
         uint32_t bw = std::max(1u, (w + 3) / 4), bh = std::max(1u, (h + 3) / 4);
         row_pitch = bw * f.bits;
-        out.assign(src, src + size_t(row_pitch) * bh * z);
+        if (z <= 1) {
+            out.assign(src, src + size_t(row_pitch) * bh * z);
+            return;
+        }
+        // a compressed volume keeps its slices by fours: for each 4x4 block of a group of four slices, the block of
+        // each slice in turn (read as whole slices, the detail volumes of the floors came out as a speckled noise)
+        out.resize(size_t(row_pitch) * bh * z);
+        uint32_t bs = f.bits, group = std::min(z, 4u);
+        size_t off = 0;
+        for (uint32_t g = 0; g < z; g += 4)
+            for (uint32_t by = 0; by < bh; by++)
+                for (uint32_t bx = 0; bx < bw; bx++)
+                    for (uint32_t s = 0; s < group && g + s < z; s++, off += bs)
+                        std::memcpy(&out[((size_t(g + s) * bh + by) * bw + bx) * bs], src + off, bs);
         return;
     }
     if (f.host == Host::R32F) {
