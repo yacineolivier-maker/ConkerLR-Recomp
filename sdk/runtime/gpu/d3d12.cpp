@@ -15,12 +15,14 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <deque>
 #include <filesystem>
 #include <mutex>
 #include <optional>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -729,6 +731,12 @@ private:
     std::vector<Query> counted_;  // since the last ClearReport
     std::deque<Report> reports_;
     bool tearing_ = false;
+    // vsync: a thread counts the output's vertical blanks; Present waits for the next one, at most kVBlankWaitMs
+    void WaitVBlank();
+    std::mutex vblank_lock_;
+    std::condition_variable vblank_cv_;
+    uint64_t vblanks_ = 0;
+    bool vblank_thread_ = false;
     uint64_t presents_ = 0;
     double fps_ = 0;
     std::chrono::steady_clock::time_point fps_t_ = std::chrono::steady_clock::now();
@@ -937,7 +945,45 @@ void D3D12Backend::Flush() { Submit(true); }
 
 void D3D12Backend::WaitFence(uint64_t value) {
     fence_->SetEventOnCompletion(value, event_);
-    WaitForSingleObject(event_, INFINITE);
+    // a GPU that stops: say what is waited for, once, then keep waiting
+    if (WaitForSingleObject(event_, 5000) == WAIT_TIMEOUT) {
+        DXGI_FRAME_STATISTICS st{};
+        HRESULT hr = swap_ ? swap_->GetFrameStatistics(&st) : E_FAIL;
+        UINT last = 0;
+        if (swap_) swap_->GetLastPresentCount(&last);
+        LOGE("d3d12: fence %llu still not reached after 5 s (completed %llu, device %08X); presents %u, shown %u "
+             "(refresh %u, stats %08X)",
+             (unsigned long long)value, (unsigned long long)fence_->GetCompletedValue(),
+             unsigned(dev_->GetDeviceRemovedReason()), last, st.PresentCount, st.SyncRefreshCount, unsigned(hr));
+        logx::Flush();
+        WaitForSingleObject(event_, INFINITE);
+    }
+}
+
+// Present(1) could stop for good in a full screen window (half the launches on one PC, the game frozen at its intro
+// or later, the GPU waiting on a flip that never came); the presents are immediate and timed by the output's
+// vertical blank instead, waited for here with a limit
+void D3D12Backend::WaitVBlank() {
+    constexpr int kVBlankWaitMs = 40;
+    if (!vblank_thread_) {
+        vblank_thread_ = true;
+        ComPtr<IDXGIOutput> out;
+        if (FAILED(swap_->GetContainingOutput(&out))) {
+            LOGW("d3d12: no output for the vertical blank, the frame limiter alone paces");
+            return;
+        }
+        std::thread([this, out] {
+            for (;;) {
+                if (FAILED(out->WaitForVBlank())) std::this_thread::sleep_for(std::chrono::milliseconds(16));
+                std::lock_guard lock(vblank_lock_);
+                vblanks_++;
+                vblank_cv_.notify_all();
+            }
+        }).detach();
+    }
+    std::unique_lock lock(vblank_lock_);
+    uint64_t seen = vblanks_;
+    vblank_cv_.wait_for(lock, std::chrono::milliseconds(kVBlankWaitMs), [&] { return vblanks_ != seen; });
 }
 
 void D3D12Backend::SetFullViewport(uint32_t w, uint32_t h) {
@@ -2958,7 +3004,7 @@ void D3D12Backend::StartCapture() {
     SYSTEMTIME tm;
     GetLocalTime(&tm);
     char stamp[32];
-    snprintf(stamp, sizeof(stamp), "%02u%02u%02u", tm.wHour, tm.wMinute, tm.wSecond);
+    snprintf(stamp, sizeof(stamp), "%02u%02u%02u_%03u", tm.wHour, tm.wMinute, tm.wSecond, tm.wMilliseconds);
     std::error_code ec;
     cap_dir_ = std::filesystem::weakly_canonical(app::ExeDir() / diag::CaptureDir() / stamp, ec);
     std::filesystem::create_directories(cap_dir_, ec);
@@ -3117,11 +3163,9 @@ void LogPerf() {
 
 void D3D12Backend::Present(const Surface& front) {
     PerfScope perf_present{g_perf.present};
-    if (cap_) {
-        FinishCapture(front);
-    } else if (g_capture.exchange(false) && CaptureOn()) {
-        StartCapture();
-    }
+    if (cap_) FinishCapture(front);
+    // a capture asked meanwhile takes the next frame: consecutive frames for what flickers
+    if (!cap_ && g_capture.exchange(false) && CaptureOn()) StartCapture();
     ResizeSwap();
     Target* t = EnsureTarget(front, false);
     if (t && LatchCpuWrite(*t)) UploadTarget(*t, front);
@@ -3129,6 +3173,17 @@ void D3D12Backend::Present(const Surface& front) {
     if (t && ext_) {
         ext_->Present(*this, *t);
         bound_rt_ = bound_ds_ = nullptr;
+    }
+    // as shown, the modern effects done
+    if (t && !cap_ && g_record > 0 && CaptureOn()) {
+        static uint32_t recorded = 0;
+        std::error_code ec;
+        cap_dir_ = std::filesystem::weakly_canonical(app::ExeDir() / diag::CaptureDir() / "suite", ec);
+        std::filesystem::create_directories(cap_dir_, ec);
+        char name[24];
+        snprintf(name, sizeof(name), "%05u", recorded++);
+        CapSave(*t, name);
+        g_record--;
     }
     if (ramp_dirty_) UploadGammaRamp();
     Transition(lut_.Get(), lut_state_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -3139,7 +3194,12 @@ void D3D12Backend::Present(const Surface& front) {
     DeliverReports();
     bool vsync = app::Get().vsync;
     auto perf_swap = PerfClock::now();
-    swap_->Present(vsync ? 1 : 0, !vsync && tearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0);
+    if (vsync) {
+        WaitVBlank();
+        swap_->Present(0, 0);
+    } else {
+        swap_->Present(0, tearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0);
+    }
     g_perf.swap += PerfMs(perf_swap);
 
     presents_++;
