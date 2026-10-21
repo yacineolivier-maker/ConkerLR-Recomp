@@ -2,13 +2,16 @@
 // de chaque thread du jeu (ceux qui attendent dans le noyau ont un contexte stable).
 #include <chrono>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
+#include <string>
 #include <thread>
 #include <vector>
 
 #include "core/log.h"
 #include "gpu/backend.h"
 #include "kernel/kernel.h"
+#include "kernel/memory.h"
 
 namespace game {
 
@@ -44,6 +47,29 @@ void StartHangWatch() {
         std::thread([s, n] {
             std::this_thread::sleep_for(std::chrono::seconds(s));
             gpu::g_record = n;
+        }).detach();
+    }
+    // XBE_MEMDUMP_AT=<s>[,<s>...] : l'image du jeu (0x10000 à 0x900000) écrite dans memdump_<s>.bin à côté de l'exe
+    if (const char* m = std::getenv("XBE_MEMDUMP_AT")) {
+        std::vector<int> at;
+        for (const char* p = m; *p;) {
+            at.push_back(std::atoi(p));
+            while (*p && *p != ',') p++;
+            if (*p == ',') p++;
+        }
+        std::thread([at] {
+            auto start = std::chrono::steady_clock::now();
+            for (int t : at) {
+                std::this_thread::sleep_until(start + std::chrono::seconds(t));
+                std::string name = "memdump_" + std::to_string(t) + ".bin";
+                if (FILE* f = std::fopen(name.c_str(), "wb")) {
+                    static const uint8_t zero[0x1000] = {};
+                    for (uint32_t a = 0x10000; a < 0x900000; a += 0x1000)
+                        std::fwrite(mem::IsCommitted(a) ? kernel::HostPtr(a) : zero, 1, 0x1000, f);
+                    std::fclose(f);
+                    LOGI("mémoire écrite dans %s", name.c_str());
+                }
+            }
         }).detach();
     }
     const char* v = std::getenv("XBE_HANG");

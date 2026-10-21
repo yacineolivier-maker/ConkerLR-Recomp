@@ -1,4 +1,7 @@
 // Hooks de diagnostic (config [[hook]]) : journalisent l'état de sous-systèmes du jeu en cours de mise au point.
+#include <cstdlib>
+#include <cstring>
+
 #include "core/log.h"
 #include "kernel/kernel.h"
 #include "xdk/hle.h"
@@ -18,4 +21,31 @@ void LogFixupEnd(X86Context& ctx, uint8_t* base) {
     (void)base;
     static int n = 0;
     if (n++ < 6) LOGI("fixup: fin écrite à %08X -> %08X (fixup courant %08X)", ctx.ecx, kernel::R32(ctx.ecx), kernel::R32(0x54A8B0));
+}
+
+// test (0x2A9442, avant le chargement du niveau demandé [0x7FA1F4], point d'entrée [0x7FA1E4]) :
+// XBE_NIVEAU=<nom de la table 0x69CF90 ou numéro> charge ce niveau à la place du premier niveau chargé après le menu,
+// XBE_ENTREE=<n> son point d'entrée. Pour passer en revue le rendu des niveaux sans y jouer.
+void ForceLevel(X86Context& ctx, uint8_t* base) {
+    (void)ctx;
+    (void)base;
+    static bool done = false;
+    static const char* want = std::getenv("XBE_NIVEAU");
+    uint32_t level = kernel::R32(0x7FA1F4);
+    LOGI("niveau : chargement du niveau %u (%s), entrée %u/%u", level,
+         level < 96 && kernel::R32(0x69CF90 + level * 4) ? kernel::ReadCString(kernel::R32(0x69CF90 + level * 4)).c_str() : "?",
+         kernel::R32(0x7FA1E4), kernel::R32(0x7FA1E8));
+    if (!want || done || level == 29) return;  // le premier niveau après le menu (Frontend)
+    done = true;
+    uint32_t id = ~0u;
+    if (*want >= '0' && *want <= '9') id = uint32_t(std::atoi(want));
+    for (uint32_t i = 0; i < 96 && id == ~0u; i++)
+        if (uint32_t n = kernel::R32(0x69CF90 + i * 4); n && _stricmp(kernel::ReadCString(n).c_str(), want) == 0) id = i;
+    if (id == ~0u) {
+        LOGW("niveau : %s absent de la table", want);
+        return;
+    }
+    kernel::W32(0x7FA1F4, id);
+    if (const char* e = std::getenv("XBE_ENTREE")) kernel::W32(0x7FA1E4, uint32_t(std::atoi(e)));
+    LOGI("niveau : test, niveau %u (%s) chargé à la place", id, want);
 }

@@ -242,6 +242,26 @@ Target Resolve(const std::string& xbox_path, uint32_t root_handle) {
     if (root_handle) {
         if (auto f = FileFromHandle(root_handle)) p = Normalize(f->xbox + "\\" + p);
     }
+    // XBE_SUBST=from=to[;from=to...]: a part of the path read as another (tests: one level's data in another's place)
+    static const std::vector<std::pair<std::string, std::string>> subst = [] {
+        std::vector<std::pair<std::string, std::string>> v;
+        if (const char* e = std::getenv("XBE_SUBST")) {
+            std::string s = e;
+            for (size_t a = 0; a < s.size();) {
+                size_t b = s.find(';', a);
+                if (b == std::string::npos) b = s.size();
+                std::string item = s.substr(a, b - a);
+                if (size_t eq = item.find('='); eq != std::string::npos) v.push_back({Upper(item.substr(0, eq)), item.substr(eq + 1)});
+                a = b + 1;
+            }
+        }
+        return v;
+    }();
+    for (const auto& [from, to] : subst)
+        if (size_t at = Upper(p).find(from); at != std::string::npos) {
+            LOG_FIRST(40, "files: %s read as %s", p.c_str(), to.c_str());
+            p = p.substr(0, at) + to + p.substr(at + from.size());
+        }
     if (p.size() >= 2 && p[1] == ':') p = "\\??\\" + p;
     std::lock_guard<std::mutex> lock(g_links_lock);
     for (int depth = 0; depth < 8; depth++) {

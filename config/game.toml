@@ -320,3 +320,7 @@ call = "MarkVideoFrame"  # src/game/video.cpp
 [[hook]]
 at = 0x3F35DB
 call = "LogFixupEnd"
+
+[[hook]]
+at = 0x2A9442
+call = "ForceLevel"  # src/game/diag_hooks.cpp : test XBE_NIVEAU
