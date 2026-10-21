@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <thread>
 
 #include "kernel/disc.h"
 #include "kernel/kernel.h"
@@ -524,6 +525,13 @@ KERNEL_EXPORT(237, NtWriteFileGather, 8) { return Transfer(a, true, a[5]); }
 
 KERNEL_EXPORT(211, NtQueryInformationFile, 5) {
     uint32_t h = a[0], iosb = a[1], out = a[2], len = a[3], cls = a[4];
+    // a title polling its files in a tight loop (the level load after New Game, until the menu music ends) starved
+    // the audio threads it waits for: on the console they run at a higher priority. Queries closer than a millisecond
+    // give the others 200 us (from the disc image, cheaper to query, the load never ended)
+    thread_local auto last = std::chrono::steady_clock::time_point{};
+    auto now = std::chrono::steady_clock::now();
+    if (now - last < std::chrono::milliseconds(1)) std::this_thread::sleep_for(std::chrono::microseconds(200));
+    last = std::chrono::steady_clock::now();
     auto f = FileFromHandle(h);
     if (!f) return kInvalidHandle;
     std::error_code ec;

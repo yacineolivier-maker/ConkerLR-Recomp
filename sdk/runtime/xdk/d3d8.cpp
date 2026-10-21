@@ -484,6 +484,23 @@ HLE_STDCALL(D3DResource_IsBusy, 1) {
     return g_backend && g_backend->Busy(res) ? 1 : 0;
 }
 HLE_STDCALL(D3D_BlockOnTime, 2) { return 0; }
+// The console scans the displayed buffer out all the time: a title drawing into a frame buffer without swapping (the
+// loading screen after New Game, 30 s and more) is seen at once. Here only a Swap shows a picture: a frame buffer drawn
+// into while nothing was presented for a while is presented as it is
+std::chrono::steady_clock::time_point g_last_present = std::chrono::steady_clock::now();
+void ShowDrawnDisplayBuffer() {
+    constexpr auto kNoSwap = std::chrono::milliseconds(100);
+    auto now = std::chrono::steady_clock::now();
+    if (!g_backend || !g_state.rt.header || now - g_last_present < kNoSwap) return;
+    for (uint32_t i = 0; i < g_buffer_count; i++)
+        if (g_buffers[i] && R32(g_buffers[i] + 4) == R32(g_state.rt.header + 4)) {
+            LOG_FIRST(4, "d3d: frame buffer %08X drawn without a swap, presented", g_state.rt.data);
+            g_backend->Present(g_state.rt);
+            g_last_present = now;
+            return;
+        }
+}
+
 HLE_STDCALL(D3DDevice_BlockOnFence, 1) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
@@ -503,6 +520,7 @@ HLE_STDCALL(D3DDevice_IsFencePending, 1) {
 HLE_STDCALL(D3D_SetFence, 1) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
+    ShowDrawnDisplayBuffer();
     return g_backend ? g_backend->Fence() : 0;
 }
 HLE_STDCALL(D3D_KickOffAndWaitForIdle, 0) {
@@ -627,6 +645,7 @@ HLE_STDCALL(D3DDevice_Swap, 1) {
     }
     Walk(Dev(kDevPush));  // reports asked for at the end of the frame
     if (g_backend) g_backend->Present(SurfaceOf(g_buffers[1]));
+    g_last_present = std::chrono::steady_clock::now();
     app::Pace();
     // like the XDK, the surfaces stay put and their memory rotates: titles keep back buffer pointers and copy its data
     uint32_t last = g_buffers[g_buffer_count - 1], data = R32(last + 4), lk = R32(last + 8);
@@ -1498,6 +1517,7 @@ HLE_STDCALL(D3DDevice_EndPush, 1) {
 // each end of a primitive the arrays, textures and combiners the methods set are turned into a draw.
 namespace {
 namespace pb {
+uint64_t g_prog_gen = 0;  // bumped by every write to the program memory: Program() keeps its last answer meanwhile
 uint32_t g_prog[136 * 4], g_prog_load = 0, g_prog_comp = 0, g_const_load = 0, g_const_comp = 0;
 uint32_t g_vb_headers = 0, g_tex_headers = 0, g_pal_headers = 0;  // 16 vertex buffer and 4 texture headers the draws point at
 uint32_t g_prim = 0;
@@ -1572,6 +1592,7 @@ std::shared_ptr<gpu::VertexShader> InlineLayout(const std::shared_ptr<gpu::Verte
 void LoadProgram(const std::vector<uint32_t>& prog, uint32_t address) {
     for (size_t i = 0; i < prog.size() && address * 4 + i < std::size(g_prog); i++) g_prog[address * 4 + i] = prog[i];
     g_prog_loaded = true;
+    g_prog_gen++;
 }
 
 std::vector<uint32_t> ProgramFrom(uint32_t start) {
@@ -1585,6 +1606,17 @@ std::vector<uint32_t> ProgramFrom(uint32_t start) {
 
 std::shared_ptr<gpu::VertexShader> Program() {
     static std::unordered_map<uint64_t, std::shared_ptr<gpu::VertexShader>> made;
+    // the same program and formats as the last draw (13000 push buffer draws a frame on the beach): its shader again
+    static struct {
+        uint64_t gen = ~0ull;
+        uint32_t start = 0, formats[16] = {};
+        std::shared_ptr<gpu::VertexShader> vs;
+    } last;
+    uint32_t now[16];
+    for (int i = 0; i < 16; i++) now[i] = Simple(0x1760 + i * 4);
+    if (last.vs && last.gen == g_prog_gen && last.start == (Simple(0x1EA0) & 0xFF) &&
+        std::memcmp(last.formats, now, sizeof(now)) == 0)
+        return last.vs;
     std::vector<uint32_t> prog;
     for (uint32_t i = Simple(0x1EA0) & 0xFF; i < 136; i++) {
         prog.insert(prog.end(), g_prog + i * 4, g_prog + i * 4 + 4);
@@ -1605,6 +1637,10 @@ std::shared_ptr<gpu::VertexShader> Program() {
             vs->stream_stride[size_t(i)] = formats[i] >> 8;
         }
     }
+    last.gen = g_prog_gen;
+    last.start = Simple(0x1EA0) & 0xFF;
+    std::memcpy(last.formats, formats, sizeof(formats));
+    last.vs = vs;
     return vs;
 }
 
@@ -1628,12 +1664,18 @@ std::shared_ptr<gpu::PixelShader> Combiners() {
     d[54] = Simple(0x1E70);  // SET_SHADER_STAGE_PROGRAM
     d[55] = Simple(0x1E74);
     d[56] = Simple(0x1E78);
+    // the last draw's combiners again without hashing them
+    static uint32_t last_d[0xF0 / 4];
+    static std::shared_ptr<gpu::PixelShader> last;
+    if (last && std::memcmp(last_d, d, sizeof(d)) == 0) return last;
     auto& ps = made[Fnv(d, sizeof(d), 1469598103934665603ull)];
     if (!ps) {
         ps = std::make_shared<gpu::PixelShader>();
         ps->handle = 0x50000000u + uint32_t(made.size());
         std::memcpy(ps->def, d, sizeof(d));
     }
+    std::memcpy(last_d, d, sizeof(d));
+    last = ps;
     return ps;
 }
 
@@ -1936,6 +1978,7 @@ void Method(uint32_t m, uint32_t v) {
         g_inline_pb.push_back(v);
     } else if (m >= 0x0B00 && m < 0x0B80) {  // vertex program, 4 dwords an instruction
         if (g_prog_load < 136) g_prog[g_prog_load * 4 + g_prog_comp] = v;
+        g_prog_gen++;
         g_prog_loaded = true;
         if (++g_prog_comp == 4) g_prog_comp = 0, g_prog_load++;
     } else if (m >= 0x0B80 && m < 0x0C00) {  // constants, 4 floats a register
