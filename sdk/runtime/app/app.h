@@ -23,9 +23,11 @@ struct Settings {
     bool vsync = true;
     uint32_t aniso = 16;             // 0 as the game asks; else forced where the title filters across mip levels
     std::string join_ip;                   // co-op: a host past the LAN the system link search also asks
+    std::string language = "francais";     // the console's language setting the title reads (XC_LANGUAGE)
 };
 
 Settings& Get();
+uint32_t LanguageCode();  // XC_LANGUAGE: 1 English, 2 Japanese, 3 German, 4 French, 5 Spanish, 6 Italian
 void Load();
 void Save();
 void LogSettings();  // every setting, as the settings file has them

@@ -32,6 +32,16 @@ Settings& Get() {
     return s;
 }
 
+uint32_t LanguageCode() {
+    static const std::pair<const char*, uint32_t> kNames[] = {
+        {"anglais", 1}, {"english", 1},  {"japonais", 2}, {"japanese", 2}, {"allemand", 3}, {"german", 3},
+        {"francais", 4}, {"français", 4}, {"french", 4},  {"espagnol", 5}, {"spanish", 5}, {"italien", 6},
+        {"italian", 6}};
+    for (const auto& [name, code] : kNames)
+        if (Get().language == name) return code;
+    return 1;
+}
+
 void Load() {
     Settings& s = Get();
     toml::table t;
@@ -50,6 +60,7 @@ void Load() {
     s.vsync = t["vsync"].value_or(s.vsync);
     s.aniso = t["anisotropic_filtering"].value_or(s.aniso);
     s.join_ip = t["join_ip"].value_or(s.join_ip);
+    s.language = t["langue"].value_or(s.language);
     for (const Option& o : kGame.options) {
         if (o.flag) *o.flag = t[o.key].value_or(*o.flag);
         else *o.value = t[o.key].value_or(*o.value);
@@ -68,7 +79,8 @@ toml::table Table() {
                   {"fps_cap", int64_t(s.fps_cap)},
                   {"vsync", s.vsync},
                   {"anisotropic_filtering", int64_t(s.aniso)},
-                  {"join_ip", s.join_ip}};
+                  {"join_ip", s.join_ip},
+                  {"langue", s.language}};
     for (const Option& o : kGame.options) {
         if (o.flag) t.insert(o.key, *o.flag);
         else t.insert(o.key, int64_t(*o.value));
