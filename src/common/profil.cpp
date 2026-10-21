@@ -73,7 +73,7 @@ void Run(int start, int seconds) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     for (auto& [tid, t] : threads) CloseHandle(t);
-    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
     SymInitialize(proc, nullptr, TRUE);
     for (auto& [tid, addrs] : hits) {
         uint32_t total = totals[tid];
@@ -89,6 +89,26 @@ void Run(int start, int seconds) {
         LOGI("profil : thread %lu, %u échantillons", tid, total);
         for (size_t i = 0; i < v.size() && i < 25; i++)
             LOGI("profil :   %5.1f %%  %s", 100.0 * v[i].first / total, v[i].second.c_str());
+        // the busiest functions of our own code line by line (line tables of the runtime and host code)
+        std::unordered_map<std::string, std::unordered_map<std::string, uint32_t>> by_line;
+        for (auto& [a, n] : addrs) {
+            IMAGEHLP_LINE64 line{sizeof(line)};
+            DWORD disp = 0;
+            if (!SymGetLineFromAddr64(proc, a, &disp, &line)) continue;
+            std::string file = line.FileName;
+            by_line[Symbol(proc, a)][file.substr(file.find_last_of("\\/") + 1) + ":" + std::to_string(line.LineNumber)] += n;
+        }
+        for (size_t i = 0, shown = 0; i < v.size() && shown < 3; i++) {
+            auto it = by_line.find(v[i].second);
+            if (it == by_line.end()) continue;
+            shown++;
+            std::vector<std::pair<uint32_t, std::string>> w;
+            for (auto& [l, n] : it->second) w.push_back({n, l});
+            std::sort(w.rbegin(), w.rend());
+            for (size_t k = 0; k < w.size() && k < 6; k++)
+                LOGI("profil :     %s : %4.1f %%  %s", v[i].second.substr(0, 40).c_str(), 100.0 * w[k].first / total,
+                     w[k].second.c_str());
+        }
         // the callers of the busiest functions, by the return address at the stack top
         std::unordered_map<std::string, std::unordered_map<std::string, uint32_t>> by_caller;
         for (auto& [a, rets] : callers[tid])

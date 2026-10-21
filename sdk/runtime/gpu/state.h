@@ -126,6 +126,9 @@ inline constexpr uint32_t kDrawMethods[] = {
     kMZWriteEnable, kMPsFinalConstant0, kMPsFinalConstant1};
 inline constexpr uint32_t kDrawConstantMethods = 8;  // kMPsConstant0 and kMPsConstant1, one per combiner stage
 
+// writes of State::vsc (d3d8.cpp, under its lock): the render thread is sent the constants only after one
+inline uint64_t g_vsc_writes = 0;
+
 // texture stage state indices
 enum : uint32_t {
     kTssAddressU = 0, kTssAddressV, kTssAddressW, kTssMagFilter, kTssMinFilter, kTssMipFilter, kTssMipLodBias,
