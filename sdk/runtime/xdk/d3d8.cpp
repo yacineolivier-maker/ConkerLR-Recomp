@@ -1395,6 +1395,17 @@ void Walk(uint32_t end) {
                 a[last] = f;
                 a[2] = 0;
                 a[3] = 1;
+            } else if (m >= 0x1900 && m < 0x1940) {  // 2 shorts, z = 0 and w = 1 (the rain drops' screen copy)
+                a += (m - 0x1900) / 4 * 4;
+                a[0] = float(int16_t(v & 0xFFFF));
+                a[1] = float(int16_t(v >> 16));
+                a[2] = 0;
+                a[3] = 1;
+            } else if (m >= 0x1980 && m < 0x1A00) {  // 4 shorts, two dwords
+                a += (m - 0x1980) / 8 * 4;
+                last = (m - 0x1980) / 4 & 1;
+                a[last * 2] = float(int16_t(v & 0xFFFF));
+                a[last * 2 + 1] = float(int16_t(v >> 16));
             } else if (m >= 0x1940 && m < 0x1980) {  // 4 bytes
                 a += (m - 0x1940) / 4 * 4;
                 for (int c = 0; c < 4; c++) a[c] = (v >> c * 8 & 0xFF) / 255.0f;
