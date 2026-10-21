@@ -51,7 +51,8 @@ constexpr uint64_t kStaleFrames = 8;  // frames a target may go unused and still
 constexpr uint64_t kUploadSize = 64ull << 20;
 // a draw starting with less than this left in the frame's ring waits for the GPU and starts the ring over
 constexpr uint64_t kUploadReserve = 8ull << 20;
-constexpr uint32_t kSrvCount = 3 * 32768;
+constexpr uint32_t kSrvCount = 3 * 131072;  // a frame's third: 32768 draws of 4 views (the beach draws 13000)
+constexpr uint32_t kSrvReserve = 256;       // a draw starts a new submission below this many free views
 constexpr uint32_t kSamplerCount = 2048;
 constexpr uint32_t kRtvCount = 1024;
 constexpr uint32_t kDsvCount = 256;
@@ -731,6 +732,20 @@ private:
     std::vector<Query> counted_;  // since the last ClearReport
     std::deque<Report> reports_;
     bool tearing_ = false;
+    // the last draw's texture views (SetTextureViewsAndSamplers): reused while nothing changed
+    struct Views {
+        ID3D12Resource* res[4] = {};
+        D3D12_SHADER_RESOURCE_VIEW_DESC sv[4] = {};
+        uint32_t slot = 0;
+        uint64_t submit = ~0ull, frame = ~0ull;
+    } views_;
+    // the last draw's constants (UploadConstants), reused while unchanged
+    struct Consts {
+        std::array<std::array<float, 4>, 192> vsc, vsc_now;
+        DrawConstants dc;
+        D3D12_GPU_VIRTUAL_ADDRESS vsc_gpu = 0, dc_gpu = 0;
+        uint64_t submit = ~0ull, frame = ~0ull;
+    } consts_;
     // vsync: a thread counts the output's vertical blanks; Present waits for the next one, at most kVBlankWaitMs
     void WaitVBlank();
     std::mutex vblank_lock_;
@@ -2070,10 +2085,16 @@ void KeyBlend(const State& s, PsoKey& k) {
     k.wmask = ((cw >> 16) & 1) | ((cw >> 8) & 1) << 1 | (cw & 1) << 2 | ((cw >> 24) & 1) << 3;
 }
 
+// diagnostics read once: getenv scans the environment under a lock, a few microseconds a draw (a third of
+// BeachRunup's frame, 13000 draws)
+const bool kNoZ = std::getenv("XBE_NOZ") != nullptr;
+const bool kNoCull = std::getenv("XBE_NOCULL") != nullptr;
+const bool kNoAlphaTest = std::getenv("XBE_NOALPHATEST") != nullptr;
+
 constexpr float kDepth24Max = 16777215.0f;  // 2^24 minus 1: a 24 bit depth buffer's units per 1.0
 
 void D3D12Backend::KeyDepthStencil(const State& s, const Assembled& a, PsoKey& k) {
-    k.zen = s.rs[kRsZEnable] != 0 && !std::getenv("XBE_NOZ");
+    k.zen = s.rs[kRsZEnable] != 0 && !kNoZ;
     if (k.zen) {
         k.zwrite = SimpleState(s, kMZWriteEnable) != 0;
         k.zfunc = SimpleState(s, kMZFunc);
@@ -2097,7 +2118,7 @@ void D3D12Backend::KeyDepthStencil(const State& s, const Assembled& a, PsoKey& k
 
 void KeyRasterizer(const State& s, const Assembled& a, PsoKey& k) {
     uint32_t cull = s.rs[kRsCullMode];
-    k.cull = cull != 0 && a.topology == Topology::Triangles && !std::getenv("XBE_NOCULL");
+    k.cull = cull != 0 && a.topology == Topology::Triangles && !kNoCull;
     k.ccw = cull == kCullCw;  // culling clockwise leaves counter clockwise as the front
     k.fill = s.rs[kRsFillMode];
 }
@@ -2152,7 +2173,7 @@ void FillSurfaceConstants(const State& s, GuestExtent size, bool vertex_program,
     c.surf[2] = 1.0f / s.zscale;
     Color(s.rs[kRsFogColor], c.fog_color);
     c.misc[0] = float(SimpleState(s, kMAlphaRef) & 0xFF);
-    c.misc[1] = SimpleState(s, kMAlphaTestEnable) && !std::getenv("XBE_NOALPHATEST") ? float(Cmp(SimpleState(s, kMAlphaFunc)) - 1) : kAlphaTestAlways;
+    c.misc[1] = SimpleState(s, kMAlphaTestEnable) && !kNoAlphaTest ? float(Cmp(SimpleState(s, kMAlphaFunc)) - 1) : kAlphaTestAlways;
     c.misc[2] = float(Cmp(s.rs[kRsShadowFunc]) - 1);
     // D3DRS_SPECULARENABLE drives the fixed function lighting only: a vertex program's oD1 reaches v1 as written
     c.misc[3] = vertex_program || s.rs[kRsSpecularEnable] ? 1.0f : 0.0f;
@@ -2316,23 +2337,38 @@ void FillLightConstants(const State& s, const FixedKey& fk, DrawConstants& c) {
 
 void D3D12Backend::UploadConstants(const State& s, const DrawShaders& sh, const PsoKey& k, const DrawTextures& stages,
                                    GuestExtent size, DrawConstants& c) {
-    Alloc vc = Upload(sizeof(s.vsc), 256);
-    std::memcpy(vc.cpu, s.vsc.data(), sizeof(s.vsc));
-    Alloc dc = Upload(sizeof(DrawConstants), 256);
+    // built here, uploaded only when they differ from the last draw's in the same submission (thousands of small
+    // draws share them: 80 MB a frame on the beach)
+    auto& vsc = consts_.vsc_now;
+    std::memcpy(vsc.data(), s.vsc.data(), sizeof(s.vsc));
     FillSurfaceConstants(s, size, sh.prog, c);
     // points: host pixels per console pixel, also keeps them off the far edge pull out of screen passes
     if (k.topo == uint32_t(Topology::Points)) c.surf[3] = PointScale();
     FillFogConstants(s, sh.prog, c);
     FillCombinerConstants(s, c);
-    if (ext_) ext_->Constants(reinterpret_cast<float(*)[4]>(vc.cpu), c.ext, bound_rt_, k.blend ? k.src : 1);
+    if (ext_) ext_->Constants(reinterpret_cast<float(*)[4]>(vsc.data()), c.ext, bound_rt_, k.blend ? k.src : 1);
     FillTextureConstants(s, stages, c);
     if (sh.fixed_transform) {
         FillTransformConstants(s, size, c);
         FillLightConstants(s, sh.fk, c);
     }
-    std::memcpy(dc.cpu, &c, sizeof(c));
-    cl_->SetGraphicsRootConstantBufferView(0, vc.gpu);
-    cl_->SetGraphicsRootConstantBufferView(1, dc.gpu);
+    bool fresh = consts_.submit == fence_value_ && consts_.frame == frame_;
+    if (!fresh || std::memcmp(consts_.vsc.data(), vsc.data(), sizeof(s.vsc)) != 0) {
+        Alloc vc = Upload(sizeof(s.vsc), 256);
+        std::memcpy(vc.cpu, vsc.data(), sizeof(s.vsc));
+        consts_.vsc = vsc;
+        consts_.vsc_gpu = vc.gpu;
+    }
+    if (!fresh || std::memcmp(&consts_.dc, &c, sizeof(c)) != 0) {
+        Alloc dc = Upload(sizeof(DrawConstants), 256);
+        std::memcpy(dc.cpu, &c, sizeof(c));
+        consts_.dc = c;
+        consts_.dc_gpu = dc.gpu;
+    }
+    consts_.submit = fence_value_;
+    consts_.frame = frame_;
+    cl_->SetGraphicsRootConstantBufferView(0, consts_.vsc_gpu);
+    cl_->SetGraphicsRootConstantBufferView(1, consts_.dc_gpu);
 }
 
 void D3D12Backend::CaptureTextures(const State& s, const DrawTextures& stages) {
@@ -2486,16 +2522,28 @@ bool UnitTexcoords(const Assembled& a) {
 
 // a stage without a texture gets a null view of its kind; the samplers read the views after
 void D3D12Backend::SetTextureViewsAndSamplers(const State& s, const Assembled& a, DrawTextures& stages) {
-    uint32_t slot = AllocSrvSlots(4);
     for (int i = 0; i < 4; i++) {
         D3D12_SHADER_RESOURCE_VIEW_DESC& sv = stages.sv[i];
         if (!stages.res[i]) {
             sv.ViewDimension = NullViewDimension(stages.info[i].kind);
             sv.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
         }
-        dev_->CreateShaderResourceView(stages.res[i], &sv, Cpu(srv_heap_.Get(), slot + i, srv_inc_));
     }
-    cl_->SetGraphicsRootDescriptorTable(2, Gpu(srv_heap_.Get(), slot, srv_inc_));
+    // the previous draw's views, while the same submission holds them: thousands of small draws with the same
+    // textures made as many views
+    bool same = views_.submit == fence_value_ && views_.frame == frame_ &&
+                std::memcmp(views_.res, stages.res, sizeof(views_.res)) == 0 &&
+                std::memcmp(views_.sv, stages.sv, sizeof(views_.sv)) == 0;
+    if (!same) {
+        views_.slot = AllocSrvSlots(4);
+        for (int i = 0; i < 4; i++)
+            dev_->CreateShaderResourceView(stages.res[i], &stages.sv[i], Cpu(srv_heap_.Get(), views_.slot + i, srv_inc_));
+        std::memcpy(views_.res, stages.res, sizeof(views_.res));
+        std::memcpy(views_.sv, stages.sv, sizeof(views_.sv));
+        views_.submit = fence_value_;
+        views_.frame = frame_;
+    }
+    cl_->SetGraphicsRootDescriptorTable(2, Gpu(srv_heap_.Get(), views_.slot, srv_inc_));
     uint32_t samplers = EnsureStageSamplers(s, stages, UnitTexcoords(a));
     cl_->SetGraphicsRootDescriptorTable(3, Gpu(smp_heap_.Get(), samplers, smp_inc_));
 }
@@ -2677,6 +2725,9 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     }
     // past the ring every upload is a buffer of its own: seconds lost on a frame that draws a whole level once
     if (CurrentFrame().used > kUploadSize - kUploadReserve) Submit(true);
+    // the same for the views: wrapping the ring overwrote views the recorded draws had yet to read (the GPU then
+    // stopped, the game frozen in the bar corridor after New Game)
+    if (CurrentFrame().srv + kSrvReserve > kSrvCount / kFrames) Submit(true);
     if (!BindTargets(s)) return;
     if (ext_ && ext_->Bound(*this, s, bound_rt_, bound_ds_, a.pretransformed) && !BindTargets(s)) return;
 
@@ -2687,7 +2738,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     EnsureVertexShader(s, a, sh);
 
     // stage textures, then the pixel shader made for them
-    DrawTextures stages;
+    DrawTextures stages{};  // zeroed: the views compare with the last draw's
     if (!BindStageTexturesAndTargets(s, stages)) return;
     PixelKey pk = MakePixelKey(s, stages.info);
     pk.quad = sh.quad;
