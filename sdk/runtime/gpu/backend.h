@@ -64,5 +64,7 @@ inline std::atomic<uint64_t> g_perf_sync_late{0}, g_perf_sync_block{0};  // read
 
 // F3: save the next frame, every draw and target, under diag::CaptureDir
 inline std::atomic<bool> g_capture{false};
+// that many presented frames saved one after the other under diag::CaptureDir (what flickers)
+inline std::atomic<int> g_record{0};
 
 }  // namespace gpu

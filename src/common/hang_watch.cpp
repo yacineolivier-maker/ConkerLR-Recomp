@@ -2,6 +2,7 @@
 // de chaque thread du jeu (ceux qui attendent dans le noyau ont un contexte stable).
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <thread>
 #include <vector>
 
@@ -14,19 +15,35 @@ namespace game {
 void StartHangWatch() {
     // XBE_CAPTURE_AT=<secondes> (avec XBE_CAPTURE_DIR) : capture d'une image complète, comme F3
     // XBE_CAPTURE_AT=<s>[,<s>...] : plusieurs captures dans la même exécution
+    // <s>x<n> : n images consécutives à partir de s (ce qui clignote)
     if (const char* c = std::getenv("XBE_CAPTURE_AT")) {
-        std::vector<int> at;
+        std::vector<std::pair<int, int>> at;
         for (const char* p = c; *p;) {
-            at.push_back(std::atoi(p));
+            int s = std::atoi(p), n = 1;
+            while (*p && *p != ',' && *p != 'x') p++;
+            if (*p == 'x') n = std::atoi(++p);
+            at.push_back({s, n});
             while (*p && *p != ',') p++;
             if (*p == ',') p++;
         }
         std::thread([at] {
             auto start = std::chrono::steady_clock::now();
-            for (int t : at) {
+            for (auto [t, n] : at) {
                 std::this_thread::sleep_until(start + std::chrono::seconds(t));
-                gpu::g_capture = true;
+                for (int i = 0; i < n; i++) {
+                    gpu::g_capture = true;
+                    while (gpu::g_capture) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
             }
+        }).detach();
+    }
+    // XBE_RECORD_AT=<s>x<n> : les n images présentées à partir de s, dans <XBE_CAPTURE_DIR>\suite
+    if (const char* r = std::getenv("XBE_RECORD_AT")) {
+        int s = std::atoi(r), n = 60;
+        if (const char* x = std::strchr(r, 'x')) n = std::atoi(x + 1);
+        std::thread([s, n] {
+            std::this_thread::sleep_for(std::chrono::seconds(s));
+            gpu::g_record = n;
         }).detach();
     }
     const char* v = std::getenv("XBE_HANG");
