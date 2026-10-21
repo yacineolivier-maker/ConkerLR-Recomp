@@ -55,6 +55,9 @@ struct Assembled {
 // the FVF bits translated to the register layout the XDK's declarations use
 void FvfInputs(uint32_t fvf, VertexShader& out);
 
+// bytes of an element of a D3DVSDT type
+uint32_t ElementBytes(uint32_t type);
+
 // false when there is nothing to draw
 // indices: the title's 16 bit indices, null for an unindexed draw
 bool Assemble(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices, Assembled& out);

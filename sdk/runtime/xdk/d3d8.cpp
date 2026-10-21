@@ -31,6 +31,8 @@ uint64_t Fnv(const void* p, size_t n, uint64_t h);
 // the bound program read with the packed vertices of an inline array, laid out by the pushed array formats
 std::shared_ptr<gpu::VertexShader> InlineLayout(const std::shared_ptr<gpu::VertexShader>& program, uint32_t& stride);
 extern bool g_fog_seen;
+// the bound declaration reaching past its stream's stride, the vertex arrays the title pushed itself instead
+void StreamsFromArrays();
 }  // namespace pb
 }  // namespace
 
@@ -200,6 +202,10 @@ void SyncDeferred() {
         for (uint32_t i = 0; i <= gpu::kTssTexCoordIndex; i++) g_state.tss[s][i] = R32(kTextureState + (s * kStageStates + i) * 4);
     // the border colour is no deferred state: the inline SetTextureStageState pushes it (SET_TEXTURE_BORDER_COLOR)
     for (uint32_t s = 0; s < 4; s++) g_state.tss[s][gpu::kTssBorderColor] = g_state.simple[(0x1B24 + s * 0x40) >> 2];
+    // the streams: this title inlines SetStreamSource (stride and buffer written to the library's table), the draws
+    // read a buffer set before (the 32x32 lighting maps of the characters were made from a cube of other vertices)
+    for (uint32_t n = 0; n < 16; n++)
+        g_state.streams[n] = {R32(kStreams + n * kStreamSize + XDK_Stream_Buffer), R32(kStreams + n * kStreamSize + XDK_Stream_Stride)};
     // complex states the title's inlined setters write to the library's table (z bias, YUV, edge antialiasing, the
     // table's own defaults such as texture factor FFFFFFFF): taken when the table changed since last read, so a push
     // buffer's cull, depth and stencil registers still hold until the title sets them again
@@ -1055,6 +1061,11 @@ HLE_STDCALL(D3DDevice_SelectVertexShader, 2) {
                 vs->inputs[size_t(i)] = {int(stream & 15), offset, type};
             }
         }
+        for (int i = 0; i < 16; i++)
+            if (vs->inputs[size_t(i)].type)
+                LOG_FIRST(40, "d3d: selected %08X (%s): v%d stream %d offset %u type %X, table %08X %08X %08X %08X", vs->handle,
+                          known != g_vs.end() ? "created" : "table", i, vs->inputs[size_t(i)].stream, vs->inputs[size_t(i)].offset,
+                          vs->inputs[size_t(i)].type, table[i * 4], table[i * 4 + 1], table[i * 4 + 2], table[i * 4 + 3]);
     }
     g_state.vs = vs;
     g_state.vs_handle = vs->handle;
@@ -1175,6 +1186,7 @@ HLE_STDCALL(D3DDevice_DrawVertices, 3) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Walk(Dev(kDevPush));  // a visibility test begun since the last draw counts this one
     SyncDeferred();
+    pb::StreamsFromArrays();
     if (g_state.rt.header && Watched(g_state.rt.data))
         LOG_FIRST(10, "watch: DrawVertices(%u, %u, %u) stream0 %08X/%u, library's %08X/%u, from %08X", a[0], a[1], a[2],
                   g_state.streams[0].vb, g_state.streams[0].stride, R32(kStreams + XDK_Stream_Buffer), R32(kStreams + XDK_Stream_Stride), R32(ctx.esp));
@@ -1186,6 +1198,7 @@ HLE_STDCALL(D3DDevice_DrawIndexedVertices, 3) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Walk(Dev(kDevPush));
     SyncDeferred();
+    pb::StreamsFromArrays();
     const uint8_t* indices = a[2] ? static_cast<const uint8_t*>(HostPtr(a[2])) : nullptr;
     if (g_backend) g_backend->Draw(g_state, a[0], 0, a[1], indices);
     return 0;
@@ -1611,6 +1624,50 @@ std::shared_ptr<gpu::PixelShader> Combiners() {
         std::memcpy(ps->def, d, sizeof(d));
     }
     return ps;
+}
+
+// The library pushes a stream's array only when SetStreamSource marked it changed; this title also pushes arrays itself
+// (0x1720 address, 0x1760 format with the stride) and leaves the library's stream on another buffer: a declaration that
+// reaches past that stream's stride while the pushed formats match it element for element is read from the arrays
+// (the 32x32 lighting maps of the characters came out black, made from a cube of 16 byte vertices)
+void StreamsFromArrays() {
+    if (!g_state.vs || !(g_state.vs_handle & 1)) return;
+    const auto& ins = g_state.vs->inputs;
+    uint32_t over = 0;  // streams the declaration reaches past
+    for (int i = 0; i < 16; i++) {
+        const auto& in = ins[size_t(i)];
+        uint32_t stride = g_state.streams[size_t(in.stream & 15)].stride;
+        if (in.type && stride && in.offset + gpu::ElementBytes(in.type) > stride) over |= 1u << (in.stream & 15);
+    }
+    if (!over) return;
+    for (uint32_t n = 0; n < 16; n++) {
+        if (!(over >> n & 1)) continue;
+        uint32_t base = ~0u, stride = 0;
+        bool match = true;
+        for (int i = 0; i < 16 && match; i++) {
+            const auto& in = ins[size_t(i)];
+            if (!in.type || uint32_t(in.stream & 15) != n) continue;
+            uint32_t f = Simple(0x1760 + i * 4), addr = Simple(0x1720 + i * 4) & 0x0FFFFFFF;
+            uint32_t b = addr - in.offset;
+            match = (f & 0xFF) == in.type && (f >> 8) >= in.offset + gpu::ElementBytes(in.type) && addr >= in.offset &&
+                    addr < mem::kPhysicalSize && (base == ~0u || (b == base && (f >> 8) == stride));
+            base = b;
+            stride = f >> 8;
+        }
+        if (!match || base == ~0u) continue;
+        if (!g_vb_headers) {
+            g_vb_headers = mem::AllocSystem(16 * 16);
+            g_tex_headers = mem::AllocSystem(4 * 32);
+            g_pal_headers = mem::AllocSystem(4 * 16);
+        }
+        uint32_t h = g_vb_headers + n * 16;
+        W32(h, 0x00000001);  // vertex buffer, one reference
+        W32(h + 4, base);
+        W32(h + 8, 0);
+        LOG_FIRST(10, "d3d: stream %u of %08X/%u under declaration %08X: pushed arrays at %08X/%u read instead", n,
+                  g_state.streams[n].vb, g_state.streams[n].stride, g_state.vs_handle, base, stride);
+        g_state.streams[n] = {h, stride};
+    }
 }
 
 // the arrays, textures, combiners and raster states the methods set, into the state a draw reads
