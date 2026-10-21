@@ -15,7 +15,10 @@
 
 namespace game {
 
+void StartProfiler();  // profil.cpp
+
 void StartHangWatch() {
+    StartProfiler();
     // XBE_CAPTURE_AT=<secondes> (avec XBE_CAPTURE_DIR) : capture d'une image complète, comme F3
     // XBE_CAPTURE_AT=<s>[,<s>...] : plusieurs captures dans la même exécution
     // <s>x<n> : n images consécutives à partir de s (ce qui clignote)

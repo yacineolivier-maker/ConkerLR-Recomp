@@ -1,6 +1,7 @@
 // Hooks de diagnostic (config [[hook]]) : journalisent l'état de sous-systèmes du jeu en cours de mise au point.
 #include <cstdlib>
 #include <cstring>
+#include <map>
 
 #include "core/log.h"
 #include "kernel/kernel.h"
@@ -49,3 +50,4 @@ void ForceLevel(X86Context& ctx, uint8_t* base) {
     if (const char* e = std::getenv("XBE_ENTREE")) kernel::W32(0x7FA1E4, uint32_t(std::atoi(e)));
     LOGI("niveau : test, niveau %u (%s) chargé à la place", id, want);
 }
+
