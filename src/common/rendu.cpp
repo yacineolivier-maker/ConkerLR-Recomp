@@ -169,6 +169,13 @@ public:
             scene_ds_ = ds;
             draws_ = 0;
         }
+        // la passe transparente commence (mélange sans écriture de profondeur) : l'opaque est fini, l'occlusion se fait
+        // là. Plus tard, elle assombrissait les couches de fourrure (qui écrivent leur profondeur) en grains sombres
+        bool transparent = s.simple[kMBlendEnable >> 2] && !s.simple[gpu::kMZWriteEnable >> 2];
+        if (scene_draw && rt == scene_ && ds == scene_ds_ && transparent && draws_ >= kMinSceneDraws && cam_.ok) {
+            Occlusion(c);
+            return true;
+        }
         if (scene_draw && rt == scene_ && ds == scene_ds_) {
             draws_++;
             Camera cam;
@@ -179,6 +186,10 @@ public:
             }
             return false;
         }
+        // une petite cible sans profondeur remplie au milieu de la scène (les cartes d'éclairage 32x32 des personnages,
+        // une image sur trois ou quatre) ne la termine pas : l'occlusion appliquée là manquait aux personnages dessinés
+        // après, qui clignotaient
+        if (scene_ && rt != scene_ && !ds && rt->gw < 320) return false;
         // la scène est finie quand on dessine ailleurs ou sans test de profondeur
         if (scene_ && draws_ >= kMinSceneDraws && cam_.ok) {
             Occlusion(c);
