@@ -3059,7 +3059,10 @@ void D3D12Backend::BlitFrame(Target& t) {
     cl_->RSSetViewports(1, &vp);
     cl_->RSSetScissorRects(1, &scissor);
     Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    Blit(t.res.Get(), t.fmt, uv, {.gamma = gamma_});
+    // rendered larger than shown (render_percent over 100): every source texel under a pixel averaged, the
+    // supersampling's antialiasing, rather than one bilinear tap that skips some
+    uint32_t taps = uint32_t(std::ceil(std::max(float(t.w) / vw, 1.0f) - kTapsSlack));
+    Blit(t.res.Get(), t.fmt, uv, {.gamma = gamma_, .taps = taps});
 }
 
 void D3D12Backend::RenderUi() {

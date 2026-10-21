@@ -73,7 +73,7 @@ void OptionsUi(double fps) {
     static const uint32_t kAniso[] = {0, 2, 4, 8, 16};
     static const char* const kAnisoNames[] = {"Au choix du jeu", "2x", "4x", "8x", "16x"};
     Choice("Filtrage anisotrope", s.aniso, kAniso, kAnisoNames, int(std::size(kAniso)));
-    Slider("Résolution du rendu", s.render_percent, 50, 200, "%d %%");
+    Slider("Résolution du rendu", s.render_percent, 50, 150, "%d %%");
     ImGui::Separator();
 
     ImGui::TextUnformatted("Affichage");

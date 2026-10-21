@@ -55,7 +55,8 @@ void Load() {
         if (mode == kModes[i]) s.display_mode = DisplayMode(i);
     s.width = t["width"].value_or(s.width);
     s.height = t["height"].value_or(s.height);
-    s.render_percent = t["render_percent"].value_or(s.render_percent);
+    // over 150 the larger targets ran the video memory out at a level's load (a crash in the driver)
+    s.render_percent = std::clamp<uint32_t>(t["render_percent"].value_or(s.render_percent), 25, 150);
     s.fps_cap = t["fps_cap"].value_or(s.fps_cap);
     s.vsync = t["vsync"].value_or(s.vsync);
     s.aniso = t["anisotropic_filtering"].value_or(s.aniso);
