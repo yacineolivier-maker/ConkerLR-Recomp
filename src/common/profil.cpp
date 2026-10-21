@@ -45,28 +45,34 @@ void Run(int start, int seconds) {
     DWORD self = GetCurrentThreadId(), pid = GetCurrentProcessId();
     std::map<DWORD, std::unordered_map<uint64_t, uint32_t>> hits;  // thread -> adresse -> échantillons
     std::map<DWORD, uint32_t> totals;
+    // the word at the stack top: a leaf function's caller (memchr, the clock...), else noise
+    std::map<DWORD, std::unordered_map<uint64_t, std::unordered_map<uint64_t, uint32_t>>> callers;
+    // the threads opened once: enumerating them each millisecond left a few samples a second
+    std::vector<std::pair<DWORD, HANDLE>> threads;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    THREADENTRY32 te{sizeof(te)};
+    for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+        if (te.th32OwnerProcessID != pid || te.th32ThreadID == self) continue;
+        if (HANDLE t = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, te.th32ThreadID))
+            threads.push_back({te.th32ThreadID, t});
+    }
+    CloseHandle(snap);
     auto end = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
     while (std::chrono::steady_clock::now() < end) {
-        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-        THREADENTRY32 te{sizeof(te)};
-        for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
-            if (te.th32OwnerProcessID != pid || te.th32ThreadID == self) continue;
-            HANDLE t = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, te.th32ThreadID);
-            if (!t) continue;
-            if (SuspendThread(t) != DWORD(-1)) {
-                CONTEXT c{};
-                c.ContextFlags = CONTEXT_CONTROL;
-                if (GetThreadContext(t, &c)) {
-                    hits[te.th32ThreadID][c.Rip]++;
-                    totals[te.th32ThreadID]++;
-                }
-                ResumeThread(t);
+        for (auto& [tid, t] : threads) {
+            if (SuspendThread(t) == DWORD(-1)) continue;
+            CONTEXT c{};
+            c.ContextFlags = CONTEXT_CONTROL;
+            if (GetThreadContext(t, &c)) {
+                hits[tid][c.Rip]++;
+                callers[tid][c.Rip][*reinterpret_cast<const uint64_t*>(c.Rsp)]++;
+                totals[tid]++;
             }
-            CloseHandle(t);
+            ResumeThread(t);
         }
-        CloseHandle(snap);
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+    for (auto& [tid, t] : threads) CloseHandle(t);
     SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
     SymInitialize(proc, nullptr, TRUE);
     for (auto& [tid, addrs] : hits) {
@@ -78,9 +84,23 @@ void Run(int start, int seconds) {
         std::sort(v.rbegin(), v.rend());
         // les threads qui attendent presque toujours au même endroit n'apprennent rien
         if (v.empty()) continue;
+        const std::string& top = v[0].second;
+        if ((top.rfind("Zw", 0) == 0 || top.rfind("Nt", 0) == 0) && v[0].first * 20 >= total * 19) continue;
         LOGI("profil : thread %lu, %u échantillons", tid, total);
         for (size_t i = 0; i < v.size() && i < 25; i++)
             LOGI("profil :   %5.1f %%  %s", 100.0 * v[i].first / total, v[i].second.c_str());
+        // the callers of the busiest functions, by the return address at the stack top
+        std::unordered_map<std::string, std::unordered_map<std::string, uint32_t>> by_caller;
+        for (auto& [a, rets] : callers[tid])
+            for (auto& [r, n] : rets) by_caller[Symbol(proc, a)][Symbol(proc, r)] += n;
+        for (size_t i = 0; i < v.size() && i < 8; i++) {
+            std::vector<std::pair<uint32_t, std::string>> w;
+            for (auto& [f, n] : by_caller[v[i].second]) w.push_back({n, f});
+            std::sort(w.rbegin(), w.rend());
+            for (size_t k = 0; k < w.size() && k < 3; k++)
+                LOGI("profil :     %s <- %4.1f %%  %s", v[i].second.substr(0, 40).c_str(), 100.0 * w[k].first / total,
+                     w[k].second.c_str());
+        }
     }
     logx::Flush();
 }

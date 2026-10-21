@@ -69,7 +69,7 @@ size_t At(const State& s, const void* p) { return size_t(static_cast<const uint8
 std::vector<Range> StateRanges() {
     static const State s;
     return {
-        {At(s, &s.simple), At(s, &s.textures) - At(s, &s.simple)},
+        {At(s, &s.rs), At(s, &s.textures) - At(s, &s.rs)},  // of simple only the methods drawing reads (SendState)
         {At(s, &s.index_buffer), At(s, &s.vs) - At(s, &s.index_buffer)},
         {At(s, &s.vsc), At(s, &s.rt) - At(s, &s.vsc)},
         {At(s, &s.scissor_count), At(s, &s.transforms) - At(s, &s.scissor_count)},
@@ -79,6 +79,8 @@ std::vector<Range> StateRanges() {
         {At(s, &s.material), sizeof(State) - At(s, &s.material)},
     };
 }
+
+constexpr size_t kStateBlock = 1024;  // bytes of State compared at once before its 64 byte pieces
 
 // equal bytes, 16 at a time: most of the state is compared on every draw
 bool Same(const uint8_t* a, const uint8_t* b, size_t n) {
@@ -315,9 +317,19 @@ private:
         const uint8_t* now = reinterpret_cast<const uint8_t*>(&s);
         Cmd c{Op::State};
         size_t first = cur_->bytes.size();
+        // 1 KB blocks compared in one pass first: a draw changes a few pieces of the 12 KB (13000 draws a frame on
+        // the beach, each piece compared alone cost a third of the title's thread)
+        const uint8_t* was = reinterpret_cast<const uint8_t*>(&sent_);
         for (const Range& r : ranges_)
-            for (size_t off = r.off, end = r.off + r.len; off < end; off += 64)
-                Delta(reinterpret_cast<const uint8_t*>(&sent_) + off, now + off, std::min<size_t>(64, end - off));
+            for (size_t block = r.off, end = r.off + r.len; block < end; block += kStateBlock) {
+                size_t block_end = std::min(block + kStateBlock, end);
+                if (Same(was + block, now + block, block_end - block)) continue;
+                for (size_t off = block; off < block_end; off += 64)
+                    Delta(was + off, now + off, std::min<size_t>(64, block_end - off));
+            }
+        for (uint32_t m : kDrawMethods) Delta(&sent_.simple[m >> 2], &s.simple[m >> 2], 4);
+        for (uint32_t base : {kMPsConstant0 >> 2, kMPsConstant1 >> 2})
+            Delta(&sent_.simple[base], &s.simple[base], kDrawConstantMethods * 4);
         std::array<uint32_t, 4> textures;
         for (size_t i = 0; i < 4; i++) textures[i] = Header(s.textures[i]);
         Delta(&sent_.textures, &textures, sizeof(textures));

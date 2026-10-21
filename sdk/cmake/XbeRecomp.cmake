@@ -72,6 +72,8 @@ function(add_xbe_image target xbe config partitions game_dir)
     set_source_files_properties(${GEN_SOURCES} PROPERTIES GENERATED TRUE
         COMPILE_OPTIONS "-O2;-fno-strict-aliasing;-Wno-unused-label;-Wno-parentheses-equality;-Wno-unused-variable")
     file(GLOB GAME_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/${game_dir}/*.cpp)
+    # function names of the runtime and host code in the PDB, for profiling and crash stacks (not the recompiled code)
+    set_source_files_properties(${XBE_RUNTIME_SOURCES} ${XBE_HOST_SOURCES} ${GAME_SOURCES} PROPERTIES COMPILE_OPTIONS "-gline-tables-only")
     # the xbe's SHA-1: the executable checks the game it finds is the release it was made from
     set(xbe_file ${CMAKE_CURRENT_SOURCE_DIR}/assets/${xbe})
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${xbe_file})

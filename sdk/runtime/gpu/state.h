@@ -116,6 +116,16 @@ enum : uint32_t {
     kMGetReport = 0x17D0,
 };
 
+// The simple states the renderer reads (SimpleState and s.simple, the extension's too): the render thread is sent
+// only these, and a draw that differs from the last in nothing else only sends its vertices. A new reader of
+// another method adds it here
+inline constexpr uint32_t kDrawMethods[] = {
+    kMAlphaFunc, kMAlphaRef, kMAlphaTestEnable, kMBlendColor, kMBlendEnable, kMBlendOp, kMColorWriteEnable,
+    kMCountEnable, kMDepthOffset, kMDestBlend, kMShadeMode, kMSlopeScale, kMSolidOffsetEnable, kMSrcBlend,
+    kMStencilFunc, kMStencilMask, kMStencilPass, kMStencilRef, kMStencilWriteMask, kMStencilZFail, kMZFunc,
+    kMZWriteEnable, kMPsFinalConstant0, kMPsFinalConstant1};
+inline constexpr uint32_t kDrawConstantMethods = 8;  // kMPsConstant0 and kMPsConstant1, one per combiner stage
+
 // texture stage state indices
 enum : uint32_t {
     kTssAddressU = 0, kTssAddressV, kTssAddressW, kTssMagFilter, kTssMinFilter, kTssMipFilter, kTssMipLodBias,
