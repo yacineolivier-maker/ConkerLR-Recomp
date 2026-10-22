@@ -25,9 +25,8 @@ Work in progress, but the single-player game is playable:
 Known issues:
 
 - Conker's tail can look paler than on the console.
-- Multiplayer (split screen, System Link) is untested. Xbox Live no longer exists.
-- Starting a **New Game** shows about 30 seconds of black screen with music before the credits: the game waits
-  for the menu music to finish, as on the console.
+- Multiplayer: the menus, game creation and lobby work; matches are untested. Xbox Live no longer exists.
+- At the start of *Hungover* Conker looks blurred and doubled: that is the game's own hangover effect.
 
 Detailed progress notes: [docs/TECHNICAL_NOTES.md](docs/TECHNICAL_NOTES.md).
 
@@ -116,8 +115,8 @@ Xbox, Direct3D 8, DirectSound et XAPI sont réécrits pour Windows (Direct3D 12,
 **État** : en cours, l'aventure est jouable. Vidéos, menus, sauvegardes, cinématiques, musique et voix
 fonctionnent ; 31 niveaux vérifiés sans plantage, 60 images/s en 1080p ; manette Xbox complète ; textes en
 français (ou autre langue du disque européen). Défauts connus : queue de Conker parfois trop
-pâle, multijoueur non testé. Une **nouvelle partie** affiche environ 30 secondes d'écran noir avec musique avant le générique : le
-jeu attend la fin de la musique du menu, comme sur la console.
+pâle, parties multijoueur non testées (menus et salon fonctionnent). Au début de *Hungover*, Conker flou et
+dédoublé : c'est l'effet de gueule de bois prévu par le jeu.
 
 **Compiler** : Visual Studio 2022 ou plus récent (C++, outils Clang et CMake), placer `default.xbe` et les
 dossiers `dvddata` et `media` dans `assets`, lancer `build.bat`. La première compilation est longue.
