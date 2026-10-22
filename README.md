@@ -17,15 +17,13 @@ Work in progress, but the single-player game is playable:
 
 - Intro videos, menus, profiles and saves, cutscenes, music, sound effects and voices work.
 - 31 levels of the adventure have been loaded and checked without crashes,
-  running at 60 fps on an RTX 3060 at 1080p with 150 % supersampling (BeachRunup excepted).
+  running at 60 fps on an RTX 3060 at 1080p with 150 % supersampling
+  (BeachRunup, the heaviest level with 13,000 draws per frame, at 57-59 fps).
 - Xbox controller fully mapped (analog buttons, triggers, White/Black on LB/RB, rumble).
 - Game text in French, German, Spanish, Italian, Japanese or English (from the European disc).
 
 Known issues:
 
-- **BeachRunup** (opening of *It's War*): the scene renders almost black when the level is loaded directly by
-  the test tools; not yet checked when reached by normal play. It is also the heaviest level (13,000 draws per
-  frame, about 30 fps).
 - Conker's tail can look paler than on the console.
 - Multiplayer (split screen, System Link) is untested. Xbox Live no longer exists.
 - Starting a **New Game** shows about 30 seconds of black screen with music before the credits: the game waits
@@ -117,9 +115,8 @@ Xbox, Direct3D 8, DirectSound et XAPI sont réécrits pour Windows (Direct3D 12,
 
 **État** : en cours, l'aventure est jouable. Vidéos, menus, sauvegardes, cinématiques, musique et voix
 fonctionnent ; 31 niveaux vérifiés sans plantage, 60 images/s en 1080p ; manette Xbox complète ; textes en
-français (ou autre langue du disque européen). Défauts connus : BeachRunup (début de *It's War*) presque noir
-quand il est chargé directement par les outils de test, queue de Conker parfois trop pâle, multijoueur non
-testé. Une **nouvelle partie** affiche environ 30 secondes d'écran noir avec musique avant le générique : le
+français (ou autre langue du disque européen). Défauts connus : queue de Conker parfois trop
+pâle, multijoueur non testé. Une **nouvelle partie** affiche environ 30 secondes d'écran noir avec musique avant le générique : le
 jeu attend la fin de la musique du menu, comme sur la console.
 
 **Compiler** : Visual Studio 2022 ou plus récent (C++, outils Clang et CMake), placer `default.xbe` et les

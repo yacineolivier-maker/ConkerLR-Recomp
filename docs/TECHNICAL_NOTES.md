@@ -64,6 +64,17 @@ programs and combiners memoised, shader resource views and constants reused when
 ring large enough for one frame (it used to wrap within a frame and overwrite views in use, which also crashed
 the driver at 200 % resolution).
 
+Two later fixes took it from 11 to 58 fps:
+
+- The render relay copies vertex buffer and surface headers into an 8 MB guest memory ring and reuses a cached
+  copy while it is within half a ring. BeachRunup filled the ring within a frame, so stale copies were
+  overwritten while still queued: surfaces read vertex buffer headers as 640x480 and their render targets were
+  recreated empty every frame (the black screen). `Scratch()` now waits for the batches that still use the
+  part of the ring it is about to overwrite.
+- A draw identical to the last full draw except for its vertices skips binding and state work entirely
+  (`FastDraw` in `d3d12.cpp`). Vertex shader constants are only sent to the render thread after a write
+  (`g_vsc_writes`), and draw related push buffer methods and pixel shader constants are sent as deltas.
+
 ## Rendering additions (`src/common/rendu.cpp`)
 
 A `gpu::Extension` adds soft shadows (the game's shadow textures blurred, made at up to 1024 pixels), GTAO
