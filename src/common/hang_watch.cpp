@@ -82,6 +82,59 @@ void StartHangWatch() {
             }
         }).detach();
     }
+    // XBE_WATCH=<adresse>[,*<adresse>+<décalage>...] (hexadécimal) : chaque changement de ces mots journalisé ;
+    // « * » lit d'abord le pointeur à l'adresse, puis le mot au décalage
+    if (const char* w = std::getenv("XBE_WATCH")) {
+        struct Watch { bool deref; uint32_t addr, off; std::string text; };
+        std::vector<Watch> watches;
+        for (const char* p = w; *p;) {
+            const char* e = p;
+            while (*e && *e != ',') e++;
+            Watch x{*p == '*', 0, 0, std::string(p, e)};
+            char* q = nullptr;
+            x.addr = uint32_t(std::strtoul(p + (x.deref ? 1 : 0), &q, 16));
+            if (q && *q == '+') x.off = uint32_t(std::strtoul(q + 1, nullptr, 16));
+            watches.push_back(x);
+            p = *e ? e + 1 : e;
+        }
+        std::thread([watches] {
+            std::vector<uint64_t> last(watches.size(), ~0ull);
+            for (;;) {
+                for (size_t i = 0; i < watches.size(); i++) {
+                    const Watch& x = watches[i];
+                    uint32_t a = x.addr;
+                    if (x.deref) {
+                        if (!mem::IsCommitted(a)) continue;
+                        a = kernel::R32(a);
+                        if (!a) continue;
+                        a += x.off;
+                    }
+                    if (!mem::IsCommitted(a)) continue;
+                    uint32_t v = kernel::R32(a);
+                    if (v != last[i]) {
+                        LOGI("surveillance : %s (%08X) = %08X", x.text.c_str(), a, v);
+                        last[i] = v;
+                    }
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }).detach();
+    }
+    // XBE_TRACE_JEU (diag_hooks.cpp) : la trace du jeu [0x84725D] et les drapeaux donnés, rallumés en continu
+    if (const char* t = std::getenv("XBE_TRACE_JEU")) {
+        std::vector<uint32_t> flags{0x84725D};
+        for (char* p = const_cast<char*>(t); *p;) {
+            if (uint32_t a = uint32_t(std::strtoul(p, &p, 16))) flags.push_back(a);
+            if (*p) p++;
+        }
+        std::thread([flags] {
+            for (;;) {
+                for (uint32_t a : flags)
+                    if (mem::IsCommitted(a)) *static_cast<uint8_t*>(kernel::HostPtr(a)) = 1;
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+        }).detach();
+    }
     const char* v = std::getenv("XBE_HANG");
     if (!v) return;
     int seconds = std::atoi(v);

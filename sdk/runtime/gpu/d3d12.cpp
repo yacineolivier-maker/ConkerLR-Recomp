@@ -2452,7 +2452,11 @@ void D3D12Backend::CaptureInputs(const State& s, const Assembled& a, const DrawC
     fprintf(cap_, "\n     verts");
     uint32_t n = 0;
     for (int r = 0; r < 16; r++) n += (a.regs >> r) & 1;
-    static const size_t kVerts = std::getenv("XBE_CAPTURE_VERTS") ? 64 : 4;
+    // XBE_CAPTURE_VERTS[=n]: the first n vertices (64 by default) instead of 4
+    static const size_t kVerts = [] {
+        const char* e = std::getenv("XBE_CAPTURE_VERTS");
+        return e ? std::max<size_t>(64, size_t(std::atoi(e))) : size_t(4);
+    }();
     for (size_t v = 0; v < std::min<size_t>(kVerts, n ? a.vertices.size() / (n * 4) : 0); v++) {
         fprintf(cap_, " [");
         for (uint32_t k = 0; k < n * 4; k++) fprintf(cap_, " %g", a.vertices[v * n * 4 + k]);

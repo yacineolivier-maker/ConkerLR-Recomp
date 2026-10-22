@@ -1,7 +1,9 @@
 // Hooks de diagnostic (config [[hook]]) : journalisent l'état de sous-systèmes du jeu en cours de mise au point.
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <string>
 
 #include "core/log.h"
 #include "kernel/kernel.h"
@@ -51,3 +53,46 @@ void ForceLevel(X86Context& ctx, uint8_t* base) {
     LOGI("niveau : test, niveau %u (%s) chargé à la place", id, want);
 }
 
+
+// entrée de la trace de débogage du jeu (0x18B30, printf vers OutputDebugString, muette sans [0x84725D]) :
+// XBE_TRACE_JEU=<octets drapeaux en hexadécimal, ex. 846FF3,846FFB> allume la trace et ces drapeaux de sous-systèmes
+// (0x846FEF-0x846FFF : audio...), chaque message journalisé « jeu : ... »
+void GameTrace(X86Context& ctx, uint8_t* base) {
+    (void)base;
+    static const char* flags = std::getenv("XBE_TRACE_JEU");
+    if (!flags) return;
+    uint32_t ap = ctx.esp + 8;
+    std::string fmt = kernel::ReadCString(kernel::R32(ctx.esp + 4), 512), out;
+    for (size_t i = 0; i < fmt.size(); i++) {
+        if (fmt[i] != '%') {
+            out += fmt[i];
+            continue;
+        }
+        std::string spec = "%";
+        i++;
+        while (i < fmt.size() && std::strchr("-+ #0123456789.lhI", fmt[i])) spec += fmt[i++];
+        if (i >= fmt.size()) break;
+        char c = fmt[i], buf[300];
+        if (c == '%') {
+            out += '%';
+        } else if (c == 's') {
+            out += kernel::ReadCString(kernel::R32(ap), 256);
+            ap += 4;
+        } else if (c == 'f' || c == 'g' || c == 'e') {
+            double d;
+            std::memcpy(&d, kernel::HostPtr(ap), 8);
+            ap += 8;
+            std::snprintf(buf, sizeof(buf), (spec + c).c_str(), d);
+            out += buf;
+        } else {
+            std::string clean;
+            for (char ch : spec)
+                if (ch != 'l' && ch != 'h' && ch != 'I') clean += ch;
+            std::snprintf(buf, sizeof(buf), (clean + (c == 'p' ? 'x' : c)).c_str(), kernel::R32(ap));
+            ap += 4;
+            out += buf;
+        }
+    }
+    while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
+    LOGI("jeu : %s", out.c_str());
+}

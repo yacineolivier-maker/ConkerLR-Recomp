@@ -173,6 +173,12 @@ struct Voice {
     bool playing = false, looping = false, paused = false;
     bool sync = false;  // held until IDirectSound_SynchPlayback
     bool active = false, ending = false;  // stream: took a packet since it went quiet, quiet again once they run out
+    // stream: IDirectSoundStream_FlushEx with DSSTREAMFLUSHEX_ASYNC, done once its release (if asked) has played;
+    // until then it plays on, fading out, and the packets it takes go with the flush
+    bool flush_pending = false;
+    int64_t release_at = 0, release_ms = 0;  // when the flush was asked, how long it lasts
+    bool released = false;  // flushed so: stopped, packets it takes come back flushed with the next mix, unplayed
+    uint32_t eg_release_ms = 0;  // the amplitude envelope's release (IDirectSoundStream_SetEG)
     double pos = 0;  // frames
     uint32_t freq = 0;
     // stream
@@ -594,10 +600,20 @@ std::optional<Cursor> BufferFrame(Voice& v) {
     return at;
 }
 
+int64_t NowMs() {
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
 // adds the voice to the bins, frames of kBins interleaved, its levels ramped across the block
 void MixVoice(Voice& v, float* bins, uint32_t frames) {
     Place at = Locate(v);
     Gains target = Levels(v, at);
+    if (v.flush_pending && v.release_ms > 0) {  // the release of an enveloped flush, a linear fade
+        float left = std::clamp(1.0f - float(NowMs() - v.release_at) / float(v.release_ms), 0.0f, 1.0f);
+        for (auto& row : target.bin)
+            for (float& g : row) g *= left;
+    }
     float itd = Itd(at.azimuth);
     if (!v.has_gain) {
         v.gain = target;
@@ -646,7 +662,20 @@ void Render(float* out, uint32_t frames) {
     bins.assign(size_t(frames) * kBins, 0.0f);
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     for (auto& [obj, v] : g_voices) {
-        if (v.paused || v.sync || (!v.stream && !v.playing)) continue;
+        if (v.released && !v.packets.empty()) {
+            for (auto& pk : v.packets) Complete(v, pk, kFlushed);
+            v.packets.clear();
+        }
+        if (v.flush_pending && NowMs() - v.release_at >= v.release_ms) {
+            // its packets come back flushed through DirectSoundDoWork, as the console's do once the flush is done
+            v.flush_pending = false;
+            v.released = true;
+            for (auto& pk : v.packets) Complete(v, pk, kFlushed);
+            v.packets.clear();
+            v.pos = 0;
+            Deactivate(v);
+        }
+        if (v.paused || v.sync || v.released || (!v.stream && !v.playing)) continue;
         MixVoice(v, bins.data(), frames);
     }
     if (dsp::Loaded()) dsp::Run(bins.data(), frames);
@@ -655,11 +684,6 @@ void Render(float* out, uint32_t frames) {
         out[i * 2] = std::clamp(b[kFrontLeft] + kFold * (b[kCentre] + b[kBackLeft]), -1.0f, 1.0f);
         out[i * 2 + 1] = std::clamp(b[kFrontRight] + kFold * (b[kCentre] + b[kBackRight]), -1.0f, 1.0f);
     }
-}
-
-int64_t NowMs() {
-    using namespace std::chrono;
-    return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
 }
 
 void Run(X86Context& ctx, const std::vector<Done>& done) {
@@ -970,9 +994,23 @@ HLE_STDCALL(IDirectSound_GetOutputLevels, 3) {
 HLE_STDCALL(DirectSoundCreateBuffer, 2) { return NewBuffer(a[0], a[1]); }
 HLE_STDCALL(IDirectSound_CreateSoundBuffer, 4) { return NewBuffer(a[1], a[2]); }
 
+// XBE_DSOUND_TRACE : each buffer and stream call but the frequent ones (status, position, packets) logged
+static void TraceCall(const char* kind, const char* name, const Args& a, int n, uint32_t ret) {
+    static const bool on = std::getenv("XBE_DSOUND_TRACE") != nullptr;
+    // 2: the packets as well, 3: every call
+    static const int level = on ? std::atoi(std::getenv("XBE_DSOUND_TRACE")) : 0;
+    if (!on || (level < 3 && (!std::strcmp(name, "GetStatus") || !std::strcmp(name, "GetCurrentPosition"))) ||
+        (level < 2 && !std::strcmp(name, "Process")))
+        return;
+    char args[96] = "";
+    for (int i = 1, at = 0; i < n && i < 7; i++) at += std::snprintf(args + at, sizeof(args) - at, " %08X", a[i]);
+    LOGI("dsound: %s %08X %s%s (from %08X)", kind, a[0], name, args, ret);
+}
+
 #define BUFFER(name, nargs)                                 \
     static uint32_t buf_##name(Voice& v, const Args& a);    \
     HLE_STDCALL(IDirectSoundBuffer_##name, nargs) {         \
+        TraceCall("buffer", #name, a, nargs, R32(ctx.esp));            \
         std::lock_guard<std::recursive_mutex> lock(g_lock); \
         Voice* v = Find(a[0]);                              \
         return v ? buf_##name(*v, a) : 0x80004005u;         \
@@ -1149,6 +1187,8 @@ static uint32_t NewStream(uint32_t desc, uint32_t out) {
     v.is3d = flags & 0x10;  // DSBCAPS_CTRL3D
     v.headroom = DefaultHeadroom(flags);
     W32(out, obj);
+    if (std::getenv("XBE_DSOUND_TRACE"))
+        LOGI("dsound: stream %08X created, %u packets, callback %08X context %08X", obj, v.max_packets, v.callback, v.context);
     return 0;
 }
 
@@ -1224,6 +1264,7 @@ HLE_STDCALL(IDirectSoundStream_SetOutputBuffer, 2) { return 0; }
 #define STREAM(name, nargs)                                     \
     static uint32_t str_##name(Voice& v, const Args& a);        \
     HLE_STDCALL(CDirectSoundStream_##name, nargs) {             \
+        TraceCall("stream", #name, a, nargs, R32(ctx.esp));                \
         uint32_t r;                                             \
         std::vector<Done> flushed;                              \
         {                                                       \
@@ -1239,6 +1280,7 @@ HLE_STDCALL(IDirectSoundStream_SetOutputBuffer, 2) { return 0; }
 
 // the stream's callbacks still queued and those of its flushed packets, in order, go to the calling thread
 static void FlushStream(Voice& v) {
+    v.flush_pending = v.released = false;
     for (auto& pk : v.packets) Complete(v, pk, kFlushed);
     v.packets.clear();
     v.pos = 0;
@@ -1277,14 +1319,26 @@ STREAM(GetInfo, 2) {
     W32(info + 12, 0);
     return 0;
 }
+// DSSTREAMSTATUS_READY (takes a packet), _PLAYING from the first packet until flushed or played out, _PAUSED.
+// XACT reads _PLAYING to know a stopping cue's stream is done.
 STREAM(GetStatus, 2) {
-    W32(a[1], v.packets.size() < v.max_packets ? 1u : 0u);  // XMEDIASTATUS_ACCEPT_INPUT
+    uint32_t st = v.packets.size() < v.max_packets ? 0x1u : 0u;
+    if (v.active) st |= 0x10000u;
+    if (v.paused) st |= 0x20000u;
+    W32(a[1], st);
     return 0;
 }
 STREAM(Process, 3) {
     uint32_t in = a[1];
     if (!in) return 0;
     Packet pk{R32(in), R32(in + 4), R32(in + 8), R32(in + 12), R32(in + 16)};
+    if (v.released) {
+        // XACT feeds a stopping cue's stream until it reads it stopped: played they would make it play on,
+        // returned during the call they would be fed again at once, forever
+        if (pk.status_ptr) W32(pk.status_ptr, kPacketPending);
+        v.packets.push_back(pk);
+        return 0;
+    }
     if (pk.completed_ptr) W32(pk.completed_ptr, 0);
     if (pk.status_ptr) W32(pk.status_ptr, kPacketPending);
     v.packets.push_back(pk);
@@ -1302,8 +1356,18 @@ STREAM(Flush, 1) {
     FlushStream(v);
     return 0;
 }
+// (this, time stamp low, high, flags): DSSTREAMFLUSHEX_ASYNC (1) returns at once and the packets come back later.
+// XACT stops a cue so and only then marks it stopping: packets returned during the call read as played ones, and
+// it fed the stream again (the menu music played to its end, 30 s, before the next level could load).
+// The release envelopes (2, 4) are not played.
 STREAM(FlushEx, 4) {
     if (a[3] && !v.active) return 0;
+    if (a[3] & 1) {
+        if (!v.flush_pending) v.release_at = NowMs();
+        v.release_ms = a[3] & 6 ? v.eg_release_ms : 0;  // DSSTREAMFLUSHEX_ENVELOPE, _ENVELOPE2
+        v.flush_pending = true;
+        return 0;
+    }
     FlushStream(v);
     return 0;
 }
@@ -1321,8 +1385,14 @@ STREAM(SetFrequency, 2) {
     return 0;
 }
 STREAM(SetFilter, 2) { return 0; }
-// the library's own writes voice registers a host stream does not have; envelopes are not played
-HLE_STDCALL(IDirectSoundStream_SetEG, 2) { return 0; }
+// the library's own writes voice registers a host stream does not have; envelopes are not played, but the
+// amplitude envelope's release (DSENVELOPEDESC dwRelease, in 512 sample steps) times an enveloped flush
+HLE_STDCALL(IDirectSoundStream_SetEG, 2) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    Voice* v = FindStream(a[0]);
+    if (v && a[1] && R32(a[1]) == 0) v->eg_release_ms = uint32_t(uint64_t(R32(a[1] + 24)) * 512 * 1000 / 48000);
+    return 0;
+}
 STREAM(SetHeadroom, 2) {
     v.headroom = Db(-int32_t(a[1]));
     return 0;
