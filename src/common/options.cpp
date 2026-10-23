@@ -1,4 +1,4 @@
-// Panneau d'options graphiques en jeu (F1) : les réglages du rendu modernisé et de l'affichage, appliqués aussitôt,
+// Panneau d'options en jeu (F1) : les réglages du rendu modernisé, de l'affichage et du clavier-souris, appliqués aussitôt,
 // enregistrés dans settings.toml par le bouton du panneau. Souris et clavier ; la manette reste au jeu.
 #include <imgui.h>
 
@@ -12,6 +12,9 @@ namespace game {
 // rendu.cpp
 extern bool g_smaa, g_occlusion, g_ombres_douces;
 extern uint32_t g_occlusion_rayon, g_occlusion_force, g_nettete, g_ombres_taille;
+// clavier_souris.cpp
+extern bool g_clavier_souris, g_souris_inverser_y;
+extern uint32_t g_souris_sensibilite;
 
 namespace {
 
@@ -34,6 +37,8 @@ void Choice(const char* label, uint32_t& v, const uint32_t* values, const char* 
 }
 
 }  // namespace
+
+bool OptionsOpen() { return g_open; }
 
 bool OptionsKey(uint32_t vk) {
     constexpr uint32_t kF1 = 0x70;  // VK_F1
@@ -81,6 +86,15 @@ void OptionsUi(double fps) {
     static const uint32_t kCaps[] = {30, 60, 120, 144, app::kFpsCapRefresh, 0};
     static const char* const kCapNames[] = {"30", "60", "120", "144", "Écran", "Sans limite"};  // Écran : juste sous sa fréquence
     Choice("Images par seconde au plus", s.fps_cap, kCaps, kCapNames, int(std::size(kCaps)));
+    ImGui::Separator();
+
+    ImGui::TextUnformatted("Commandes");
+    ImGui::Checkbox("Clavier et souris (manette 1)", &g_clavier_souris);
+    if (g_clavier_souris) {
+        Slider("Sensibilité de la souris", g_souris_sensibilite, 10, 400, "%d %%");
+        ImGui::Checkbox("Inverser la souris verticalement", &g_souris_inverser_y);
+        ImGui::TextDisabled("Touches : table [clavier_souris] de settings.toml");
+    }
     ImGui::Separator();
 
     if (ImGui::Button("Enregistrer")) {

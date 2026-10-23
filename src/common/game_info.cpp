@@ -5,6 +5,12 @@ namespace game {
 void StartHangWatch();  // hang_watch.cpp
 void StartApu();        // apu.cpp
 void AutoPad(int port, input::Pad& pad);  // autopad.cpp
+// clavier_souris.cpp
+void ClavierCharger(const void* table);
+void ClavierEnregistrer(void* table);
+void ClavierFenetre(void* hwnd);
+bool ClavierMessage(uint32_t msg, uintptr_t wp, intptr_t lp, intptr_t* result);
+void ClavierSouris(int port, input::Pad& pad);
 // rendu.cpp
 extern bool g_smaa, g_occlusion, g_ombres_douces;
 extern uint32_t g_occlusion_rayon, g_occlusion_force, g_nettete, g_ombres_taille;
@@ -14,12 +20,18 @@ bool RenduKey(uint32_t vk);
 bool OptionsKey(uint32_t vk);
 void OptionsUi(double fps);
 
+void Pad(int port, input::Pad& pad) {
+    AutoPad(port, pad);
+    ClavierSouris(port, pad);
+}
+
 void Init() {
     StartHangWatch();
     InstallRendu();
 }
 
-bool Message(void*, uint32_t msg, uintptr_t wp, intptr_t, intptr_t* result) {
+bool Message(void*, uint32_t msg, uintptr_t wp, intptr_t lp, intptr_t* result) {
+    if (ClavierMessage(msg, wp, lp, result)) return true;
     constexpr uint32_t kKeyDown = 0x0100;  // WM_KEYDOWN
     if (msg != kKeyDown || !(RenduKey(uint32_t(wp)) || OptionsKey(uint32_t(wp)))) return false;
     *result = 0;
@@ -45,13 +57,13 @@ const app::GameInfo app::kGame = {
                 {"occlusion_rayon", nullptr, &game::g_occlusion_rayon},
                 {"occlusion_force", nullptr, &game::g_occlusion_force},
                 {"nettete", nullptr, &game::g_nettete}},
-    .load = nullptr,
-    .save = nullptr,
+    .load = game::ClavierCharger,
+    .save = game::ClavierEnregistrer,
     .init = game::Init,
     .loaded = game::StartApu,
-    .window = nullptr,
+    .window = game::ClavierFenetre,
     .message = game::Message,
     .ui = game::OptionsUi,
-    .pad = game::AutoPad,
+    .pad = game::Pad,
     .rumble = nullptr,
 };

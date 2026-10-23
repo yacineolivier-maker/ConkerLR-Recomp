@@ -81,6 +81,31 @@ run `Conker.exe`. Saves go to the `hdd` folder beside the exe.
 
 Voices exist only in English on the disc; the game subtitles them in the chosen language.
 
+## Keyboard and mouse
+
+A fallback for playing without a controller. It adds to controller 1, which stays usable alongside. Keys are
+taken by position: ZQSD on an AZERTY keyboard is WASD on a QWERTY one. While the game window is in front and
+the F1 panel is closed, the mouse is captured and hidden.
+
+| Controller | Default keys | In game |
+|---|---|---|
+| Left stick | Z Q S D (W A S D in QWERTY), Shift to walk | move |
+| Right stick | mouse | camera |
+| A | Space, Enter | jump, confirm |
+| B | left click, E | context action, attack, back in menus |
+| X / Y | right click, R / F | |
+| Left trigger | Left Ctrl, C | crouch, skip cutscenes |
+| Right trigger | middle click, A (Q in QWERTY) | |
+| White / Black | 1 / 2 | |
+| Start / Back | Esc / Backspace | pause |
+| D-pad | arrow keys | menus |
+| Stick clicks | V / mouse button 4 | |
+
+Turn it off, set the mouse sensitivity or invert it in F1. Keys are remapped in the `[clavier_souris]` table of
+`settings.toml`, written by F1 > Enregistrer. Each action takes a list of key names: a character as printed on the
+keyboard, or `Espace`, `Entrée`, `Échap`, `Tab`, `Maj`, `Ctrl`, `Alt`, `Retour arrière`, `Flèche haut` (`bas`,
+`gauche`, `droite`), `Clic gauche` (`droit`, `milieu`), `Souris 4`, `Souris 5`, `F2` to `F12`.
+
 ## Contributing
 
 Bug reports with the level, what you did and a screenshot are welcome (use the issue template). Logs are in
@@ -123,5 +148,11 @@ dossiers `dvddata` et `media` dans `assets`, lancer `build.bat`. La première co
 
 **Jouer** : un dossier `assets` à côté de `Conker.exe` avec votre image disque (`.iso`) ou les fichiers
 extraits. Réglages dans `settings.toml` (tableau ci-dessus) ou en jeu avec **F1**.
+
+**Clavier et souris** (dépannage, en plus de la manette 1) : ZQSD pour se déplacer (Maj pour marcher), souris
+pour la caméra, Espace = A (sauter), clic gauche ou E = B (action, attaque), clic droit ou R = X, F = Y,
+Ctrl gauche ou C = gâchette gauche (s'accroupir, passer les cinématiques), clic milieu ou A = gâchette droite,
+1 / 2 = Blanc / Noir, Échap = Start, Retour arrière = Back, flèches = croix. Réglages dans F1 ; touches
+modifiables dans la table `[clavier_souris]` de `settings.toml`.
 
 Licence MIT. Conker: Live & Reloaded © Microsoft / Rare ; projet sans lien avec Microsoft, Rare ou Xbox.
