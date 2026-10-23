@@ -34,7 +34,7 @@ Detailed progress notes: [docs/TECHNICAL_NOTES.md](docs/TECHNICAL_NOTES.md).
 
 - Any resolution, borderless, fullscreen or windowed; 16:9 and wider.
 - Internal resolution up to 200 % (supersampling), SMAA, adaptive sharpening, 16x anisotropic filtering.
-- Unlocked frame rate (60 fps by default), vsync.
+- Unlocked frame rate (60 fps by default, or just under the monitor's refresh rate), vsync.
 - Modern additions, all optional: soft shadows, larger shadow maps, ambient occlusion (GTAO).
 - The console's audio DSP effects (I3DL2 reverb, filters) reproduced.
 - In-game options overlay on **F1** (mouse), saved to `settings.toml`. F7 / F8 / F9 toggle SMAA, ambient
@@ -70,7 +70,7 @@ run `Conker.exe`. Saves go to the `hdd` folder beside the exe.
 | `display_mode` | `"borderless"` | `"borderless"`, `"fullscreen"` or `"windowed"` |
 | `width`, `height` | `0` | output resolution, 0 = desktop |
 | `render_percent` | `150` | internal resolution in % of the output height (25 to 200) |
-| `fps_cap` | `60` | 0 = unlimited |
+| `fps_cap` | `60` | 0 = unlimited, 1 = just under the monitor's refresh rate |
 | `vsync` | `true` | |
 | `anisotropic_filtering` | `16` | 0 = the game's own filtering |
 | `langue` | `"francais"` | game text: `francais`, `anglais`, `allemand`, `espagnol`, `italien`, `japonais` |
