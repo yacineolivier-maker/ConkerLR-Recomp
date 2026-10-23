@@ -1,4 +1,4 @@
-// Direct3D 8 (XDK 5849) entry points the title calls, implemented on the host renderer.
+// Direct3D 8 (XDK 4831 and 5849) entry points the title calls, implemented on the host renderer.
 // Resource creation, locking and the XG helpers stay recompiled: they only manage memory.
 #include <algorithm>
 #include <atomic>
@@ -63,6 +63,14 @@ void StreamsFromArrays();
 #ifndef SYM_D3DDevice_Reset
 #define SYM_D3DDevice_Reset FFFFFE04
 #define HAS_D3DDevice_Reset 0
+#endif
+#ifndef SYM_D3DDevice_GetRasterStatus
+#define SYM_D3DDevice_GetRasterStatus FFFFFE07
+#define HAS_D3DDevice_GetRasterStatus 0
+#endif
+#ifndef SYM_D3D_BlockOnNonSurfaceResource
+#define SYM_D3D_BlockOnNonSurfaceResource FFFFFE0A
+#define HAS_D3D_BlockOnNonSurfaceResource 0
 #endif
 
 namespace d3d {
@@ -281,6 +289,51 @@ void ApplyDefaultStates(X86Context& ctx) {
 #endif
 }
 
+// The frame buffers a D3DPRESENT_PARAMETERS asks for become the device's targets, the viewport covers them. The
+// renderer is made at the first ones' size.
+void SetFrameBuffers(const char* caller, uint32_t pp) {
+    uint32_t w = R32(pp), h = R32(pp + 4), fmt = R32(pp + 8), count = std::max<uint32_t>(R32(pp + 12), 1);
+    uint32_t auto_depth = R32(pp + 0x20), depth_fmt = R32(pp + 0x24), interval = R32(pp + 0x30);
+    if (!w) w = 640;
+    if (!h) h = 480;
+    LOGI("d3d: %s %ux%u format %X buffers %u depth %u format %X interval %X flags %X", caller, w, h, fmt, count,
+         auto_depth, depth_fmt, interval, R32(pp + 0x28));
+    uint32_t color_fmt = gpu::LinearColorFormat(fmt);
+    uint32_t zf = auto_depth ? gpu::LinearDepthFormat(depth_fmt) : 0;
+    // surfaces of the same shape are kept: a title wraps their memory in textures of its own across a Reset
+    static std::array<uint32_t, 5> made{};
+    std::array<uint32_t, 5> asked{w, h, color_fmt, std::min<uint32_t>(count + 1, 3), zf};
+    if (asked != made) {
+        made = asked;
+        g_buffer_count = asked[3];
+        for (uint32_t i = 0; i < g_buffer_count; i++) g_buffers[i] = NewSurface(w, h, color_fmt, 4);
+        g_depth = zf ? NewSurface(w, h, zf, zf == 0x30 || zf == 0x31 ? 2 : 4) : 0;  // 0x30 LIN_D16, 0x31 LIN_F16
+    }
+    if (!g_backend) {
+        g_backend = gpu::CreateBackend();
+        if (!g_backend->Init(w, h)) LOGE("d3d: renderer init failed");
+        if (kRenderThread) g_backend = gpu::CreateThreadedBackend(std::move(g_backend));
+    }
+    g_state.viewport = {0, 0, w, h, 0.0f, 1.0f};
+    SetDev(kDevRenderTarget, g_buffers[1]);
+    SetDev(kDevDepth, g_depth);
+    SetDev(kDevBackBuffer, g_buffers[1]);
+    SetDev(kDevFrontBuffer, g_buffers[1]);
+    float one = 1.0f, zs = g_depth && (R32(g_depth + 12) >> 8 & 0xFF) == 0x30 ? 65535.0f : 16777215.0f;
+    std::memcpy(HostPtr(kDevice + kDevSuperX), &one, 4);
+    std::memcpy(HostPtr(kDevice + kDevSuperY), &one, 4);
+    std::memcpy(HostPtr(kDevice + kDevZScale), &zs, 4);
+    // fields the library's init sets that inlined library code and the default states read
+    if (XDK_CDevice_AutoDepth != xdk::kUnknown) SetDev(XDK_CDevice_AutoDepth, g_depth);
+    if (XDK_CDevice_BackBufferScale != xdk::kUnknown) {
+        std::memcpy(HostPtr(kDevice + XDK_CDevice_BackBufferScale), &one, 4);
+        std::memcpy(HostPtr(kDevice + XDK_CDevice_BackBufferScale + 4), &one, 4);
+    }
+    g_state.rt = SurfaceOf(g_buffers[1]);
+    g_state.zs = SurfaceOf(g_depth);
+    UpdateViewportConstants();
+}
+
 constexpr bool kVBlank = XDK_CDevice_VBlankCount != xdk::kUnknown && XDK_CDevice_VBlankEvent != xdk::kUnknown &&
                          XDK_CDevice_VBlankCallback != xdk::kUnknown;
 
@@ -333,49 +386,19 @@ HLE_STDCALL(Direct3D_CreateDevice, 6) {
                 XDK_KEY(DirtyFlags_Texture), XDK_KEY(TextureState_Stage), XDK_KEY(Stream_Size),
                 XDK_KEY(Stream_Stride), XDK_KEY(Stream_Buffer));
     std::lock_guard<std::recursive_mutex> lock(g_lock);
-    uint32_t pp = a[4];  // D3DPRESENT_PARAMETERS
-    uint32_t w = R32(pp), h = R32(pp + 4), fmt = R32(pp + 8), count = std::max<uint32_t>(R32(pp + 12), 1);
-    uint32_t auto_depth = R32(pp + 0x20), depth_fmt = R32(pp + 0x24), interval = R32(pp + 0x30);
-    if (!w) w = 640;
-    if (!h) h = 480;
-    LOGI("d3d: CreateDevice %ux%u format %X buffers %u depth %u format %X interval %X flags %X", w, h, fmt, count,
-         auto_depth, depth_fmt, interval, R32(pp + 0x28));
     std::memset(HostPtr(kDevice), 0, XDK_CDevice_Size);
     W32(kDevicePtr, kDevice);
     ScratchPush();
-
-    uint32_t color_fmt = gpu::LinearColorFormat(fmt);
-    g_buffer_count = std::min<uint32_t>(count + 1, 3);
-    for (uint32_t i = 0; i < g_buffer_count; i++) g_buffers[i] = NewSurface(w, h, color_fmt, 4);
-    g_depth = 0;
-    if (auto_depth) {
-        uint32_t zf = gpu::LinearDepthFormat(depth_fmt);
-        g_depth = NewSurface(w, h, zf, zf == 0x30 || zf == 0x31 ? 2 : 4);  // 0x30 LIN_D16, 0x31 LIN_F16
-    }
-    if (!g_backend) {
-        g_backend = gpu::CreateBackend();
-        if (!g_backend->Init(w, h)) LOGE("d3d: renderer init failed");
-        if (kRenderThread) g_backend = gpu::CreateThreadedBackend(std::move(g_backend));
-    }
     g_state = gpu::State{};
     gpu::g_vsc_writes++;
-    g_state.viewport = {0, 0, w, h, 0.0f, 1.0f};
-    SetDev(kDevRenderTarget, g_buffers[1]);
-    SetDev(kDevDepth, g_depth);
-    SetDev(kDevBackBuffer, g_buffers[1]);
-    SetDev(kDevFrontBuffer, g_buffers[1]);
-    float one = 1.0f, zs = g_depth && (R32(g_depth + 12) >> 8 & 0xFF) == 0x30 ? 65535.0f : 16777215.0f;
-    std::memcpy(HostPtr(kDevice + kDevSuperX), &one, 4);
-    std::memcpy(HostPtr(kDevice + kDevSuperY), &one, 4);
-    std::memcpy(HostPtr(kDevice + kDevZScale), &zs, 4);
-    // fields the library's init sets that inlined library code and the default states read
-    if (XDK_CDevice_AutoDepth != xdk::kUnknown) SetDev(XDK_CDevice_AutoDepth, g_depth);
-    if (XDK_CDevice_BackBufferScale != xdk::kUnknown) {
-        std::memcpy(HostPtr(kDevice + XDK_CDevice_BackBufferScale), &one, 4);
-        std::memcpy(HostPtr(kDevice + XDK_CDevice_BackBufferScale + 4), &one, 4);
-    }
+    SetFrameBuffers("CreateDevice", a[4]);
     // 60 Hz, widescreen
     if (XDK_CDevice_DisplayFlags != xdk::kUnknown) SetDev(XDK_CDevice_DisplayFlags, 0x400000 | (app::Widescreen() ? 0x10000 : 0));
+    // the miniport's hardware init leaves an identity ramp in slot 0, which GetGammaRamp reads until one is set
+    if (XDK_CDevice_GammaRamps != xdk::kUnknown) {
+        uint8_t* ramp = static_cast<uint8_t*>(HostPtr(kDevice + XDK_CDevice_GammaRamps));  // red, green, blue
+        for (uint32_t i = 0; i < 256; i++) ramp[i] = ramp[256 + i] = ramp[512 + i] = uint8_t(i);
+    }
 #if HAS_D3D_FvfShader
     if (XDK_CDevice_VertexShader != xdk::kUnknown) SetDev(XDK_CDevice_VertexShader, SYM(D3D_FvfShader));
 #endif
@@ -387,45 +410,28 @@ HLE_STDCALL(Direct3D_CreateDevice, 6) {
         if (!started) StartHostThread("vertical blank", VerticalBlank);
         started = true;
     }
-    g_state.rt = SurfaceOf(g_buffers[1]);
-    g_state.zs = SurfaceOf(g_depth);
-    UpdateViewportConstants();
     ApplyDefaultStates(ctx);
     if (a[5]) W32(a[5], kDevice);
     return 0;
 }
 
 // Reset(present parameters): the swap chain at a new size or format. The library's own Reset reprograms the
-// NV2A's FIFO and display registers, which the host has none of: the buffers are made anew, as CreateDevice does.
+// NV2A's FIFO and display registers, which the host has none of: the frame buffers pp asks for, the targets on them
+// and cleared, as the library's Reset leaves the device. The device's references move back to the frame buffers
+// first, so kept ones hold theirs as CreateDevice made them.
 HLE_STDCALL(D3DDevice_Reset, 1) {
+    constexpr uint32_t kClearTargetAndZ = 3;
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Walk(Dev(kDevPush));  // what the title pushed itself before this call comes first
-    uint32_t pp = a[0];
-    uint32_t w = R32(pp), h = R32(pp + 4), fmt = R32(pp + 8), count = std::max<uint32_t>(R32(pp + 12), 1);
-    uint32_t auto_depth = R32(pp + 0x20), depth_fmt = R32(pp + 0x24);
-    if (!w) w = 640;
-    if (!h) h = 480;
-    LOGI("d3d: Reset %ux%u format %X buffers %u depth %u format %X flags %X", w, h, fmt, count, auto_depth, depth_fmt,
-         R32(pp + 0x28));
-    uint32_t color_fmt = gpu::LinearColorFormat(fmt);
-    g_buffer_count = std::min<uint32_t>(count + 1, 3);
-    for (uint32_t i = 0; i < g_buffer_count; i++) g_buffers[i] = NewSurface(w, h, color_fmt, 4);
-    g_depth = 0;
-    if (auto_depth) {
-        uint32_t zf = gpu::LinearDepthFormat(depth_fmt);
-        g_depth = NewSurface(w, h, zf, zf == 0x30 || zf == 0x31 ? 2 : 4);
-    }
+    uint32_t old_rt = Dev(kDevRenderTarget), old_zs = Dev(kDevDepth);
+    AddRef(ctx, g_buffers[1]);
+    AddRef(ctx, g_depth);
     SetDev(kDevRenderTarget, g_buffers[1]);
     SetDev(kDevDepth, g_depth);
-    SetDev(kDevBackBuffer, g_buffers[1]);
-    SetDev(kDevFrontBuffer, g_buffers[1]);
-    if (XDK_CDevice_AutoDepth != xdk::kUnknown) SetDev(XDK_CDevice_AutoDepth, g_depth);
-    float zs = g_depth && (R32(g_depth + 12) >> 8 & 0xFF) == 0x30 ? 65535.0f : 16777215.0f;
-    std::memcpy(HostPtr(kDevice + kDevZScale), &zs, 4);
-    g_state.viewport = {0, 0, w, h, 0.0f, 1.0f};
-    g_state.rt = SurfaceOf(g_buffers[1]);
-    g_state.zs = SurfaceOf(g_depth);
-    UpdateViewportConstants();
+    Release(ctx, old_rt);
+    Release(ctx, old_zs);
+    SetFrameBuffers("Reset", a[0]);
+    if (g_backend) g_backend->Clear(g_state, 0, nullptr, kClearTargetAndZ, 0, 1.0f, 0);
     return 0;
 }
 
@@ -468,6 +474,16 @@ HLE_WRAP(Lock2DSurface, 6) {
     }
 }
 HLE_STDCALL(D3DResource_BlockUntilNotBusy, 1) {
+    if (a[0] && g_backend) {
+        std::lock_guard<std::recursive_mutex> lock(g_lock);
+        g_backend->WaitResource(a[0]);
+    }
+    gpu::MarkDirty(a[0]);
+    return 0;
+}
+// (resource): Lock2 of a vertex buffer or palette. The library waits on GPU time stamps, which the host does not keep
+// (BlockOnTime returns at once), so a title refilling a buffer would overwrite draws not yet taken.
+HLE_STDCALL(D3D_BlockOnNonSurfaceResource, 1) {
     if (a[0] && g_backend) {
         std::lock_guard<std::recursive_mutex> lock(g_lock);
         g_backend->WaitResource(a[0]);
@@ -548,6 +564,21 @@ HLE_STDCALL(D3DDevice_BlockUntilVerticalBlank, 0) {
     std::this_thread::sleep_for(std::chrono::milliseconds(16));
     return 0;
 }
+// (status): D3DRASTER_STATUS {InVBlank, ScanLine} on a 60 Hz frame clock. The library reads the GPU's scanline,
+// which counts the front buffer's lines, then the blank: 45 lines per 480 shown, as on NTSC.
+HLE_STDCALL(D3DDevice_GetRasterStatus, 1) {
+    constexpr int64_t kFrameMicroseconds = 16667;
+    constexpr uint32_t kBlankLines = 45;
+    constexpr uint32_t kShownLines = 480;
+    uint32_t shown = g_buffers[0] ? (R32(g_buffers[0] + 0x10) >> 12 & 0xFFF) + 1 : kShownLines;
+    uint32_t lines = shown + shown * kBlankLines / kShownLines;
+    auto now = std::chrono::steady_clock::now().time_since_epoch();
+    int64_t into_frame = std::chrono::duration_cast<std::chrono::microseconds>(now).count() % kFrameMicroseconds;
+    uint32_t line = uint32_t(into_frame * lines / kFrameMicroseconds);
+    W32(a[0], line >= shown);
+    W32(a[0] + 4, line < shown ? line : 0);
+    return 0;
+}
 HLE_STDCALL(D3DDevice_SetFlickerFilter, 1) { return 0; }
 HLE_STDCALL(D3DDevice_SetSoftDisplayFilter, 1) { return 0; }
 HLE_STDCALL(D3DDevice_EnableOverlay, 1) { return 0; }
@@ -566,9 +597,13 @@ HLE_STDCALL(D3DDevice_PersistDisplay, 0) {
 }
 HLE_STDCALL(D3DDevice_FlushVertexCache, 0) { return 0; }
 
+// The library keeps the ramp in one of two device slots for GetGammaRamp: both get it, whichever one its index names
 HLE_STDCALL(D3DDevice_SetGammaRamp, 2) {
     uint8_t ramp[768];
     std::memcpy(ramp, HostPtr(a[1]), 768);
+    if (XDK_CDevice_GammaRamps != xdk::kUnknown)
+        for (uint32_t slot = 0; slot < 2; slot++)
+            std::memcpy(HostPtr(kDevice + XDK_CDevice_GammaRamps + slot * sizeof(ramp)), ramp, sizeof(ramp));
     if (g_backend) g_backend->SetGamma(ramp);
     return 0;
 }

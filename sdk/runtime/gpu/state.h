@@ -8,7 +8,7 @@
 // this to D3D12; nothing here models the console's GPU.
 namespace gpu {
 
-// D3DRS indices of the XDK 5849 build this title links, taken from its own tables
+// D3DRS indices of XDK 4831 and 5849, which number them alike, taken from their own tables
 enum : uint32_t {
     kRsDeferredFirst = 92,
     kRsFogEnable = 92,

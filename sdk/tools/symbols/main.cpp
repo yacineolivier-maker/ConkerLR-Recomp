@@ -103,6 +103,7 @@ struct DataRef {
     uint32_t insn = 0;
     bool imm = false;
     uint32_t xtlid = 0;  // .XTLID export id, used when no function has it
+    std::vector<uint32_t> deref = {};  // dwords read in turn at these offsets from the operand: data behind a table
 };
 
 // Sweep and hashing
@@ -636,6 +637,8 @@ bool LoadSigs(const fs::path& p, SigFile& f) {
                 d.insn = uint32_t((*e)["insn"].value_or(int64_t(0)));
                 d.imm = (*e)["op"].value_or(std::string()) == "imm";
                 d.xtlid = uint32_t((*e)["xtlid"].value_or(int64_t(0)));
+                if (auto p = (*e)["deref"].as_array())
+                    for (auto& o : *p) d.deref.push_back(uint32_t(o.value_or(int64_t(0))));
             }
             f.data[std::string(k.str())] = d;
         }
@@ -797,6 +800,47 @@ std::optional<DataRef> FindRef(const Image& img, const std::string& n, uint32_t 
     return ref;
 }
 
+constexpr uint32_t kTableSpan = 0x40;  // bytes of a table searched at each level
+
+// offsets of the dwords read in turn from a, one or two levels, that lead to dva. A table or record lies inside one
+// section, so a read past the section's end is a neighbor's data; records in .text are game code.
+std::optional<std::vector<uint32_t>> TablePath(const xbe::Image& x, uint32_t a, uint32_t dva) {
+    for (uint32_t i = 0; i < kTableSpan; i += 4) {
+        uint32_t p = 0;
+        if (x.SectionAt(a + i) != x.SectionAt(a) || !x.Read32(a + i, p)) continue;
+        if (p == dva) return std::vector<uint32_t>{i};
+        const xbe::Section* s = x.SectionAt(p);
+        if (!s || s->name == ".text") continue;
+        for (uint32_t j = 0; j < kTableSpan; j += 4) {
+            uint32_t q = 0;
+            if (x.SectionAt(p + j) == s && x.Read32(p + j, q) && q == dva) return std::vector<uint32_t>{i, j};
+        }
+    }
+    return std::nullopt;
+}
+
+// the first instruction of function n in [va, va + len) holding the address of a table dva is read from
+std::optional<DataRef> FindTableRef(const Image& img, const std::string& n, uint32_t va, uint32_t len, uint32_t dva) {
+    std::optional<DataRef> ref;
+    img.Walk(va, len, [&](uint32_t, uint32_t i, const ZydisDecodedInstruction& in) {
+        auto check = [&](uint32_t a, bool imm) {
+            if (ref || !IsAddr(a)) return;
+            if (auto path = TablePath(img.x, a, dva)) ref = DataRef{n, i, imm, 0, *path};
+        };
+        if (in.raw.disp.size == 32) check(uint32_t(in.raw.disp.value), false);
+        for (auto& im : in.raw.imm)
+            if (im.size == 32 && !im.is_relative) check(uint32_t(im.value.u), true);
+    });
+    return ref;
+}
+
+// the anchor this title signed at va, empty for none
+std::string AnchorAt(const SigFile& sf, const std::map<std::string, uint32_t>& anchor_at, uint32_t va) {
+    for (auto& [n, a] : anchor_at)
+        if (a == va && sf.anchors.count(n)) return n;
+    return {};
+}
+
 // signs n at va as an anchor; false and dropped when identical functions exist
 bool AddAnchor(const Title& t, SigFile& sf, std::map<std::string, uint32_t>& anchor_at, const std::string& n,
                uint32_t va) {
@@ -812,20 +856,26 @@ bool AddAnchor(const Title& t, SigFile& sf, std::map<std::string, uint32_t>& anc
 void SignData(const Title& t, const std::set<std::string>& skip, const std::map<std::string, uint32_t>& fresh,
               SigFile& sf) {
     std::map<std::string, uint32_t> anchor_at;
-    for (auto& [dn, dva] : t.cfg.data) {
-        if (skip.count(dn) || !sf.data[dn].in.empty() || sf.data[dn].xtlid || !dva) continue;
-        std::vector<std::pair<std::string, uint32_t>> order = DataCandidates(t, fresh, sf, dn);
-        for (auto& [n, va] : order) {
+    // the first candidate whose code finds dva sets the data's recipe
+    auto sign = [&](const std::string& dn, uint32_t dva, decltype(&FindRef) find) {
+        for (auto& [n, va] : DataCandidates(t, fresh, sf, dn)) {
             bool is_sym = fresh.count(n) && fresh.at(n) == va;
             if (!is_sym && sf.names.count(n)) continue;
             uint32_t len = is_sym ? sf.symbols[n].len : MakeSig(t, va).len;
-            std::optional<DataRef> ref = FindRef(t.img, n, va, len, dva);
+            std::optional<DataRef> ref = find(t.img, n, va, len, dva);
             if (!ref) continue;
-            if (!is_sym && sf.anchors.count(n)) continue;
-            if (!is_sym && !AddAnchor(t, sf, anchor_at, n, va)) continue;
+            // a function this title already anchored for other data serves this one too
+            std::string made = AnchorAt(sf, anchor_at, va);
+            if (!is_sym && !made.empty()) ref->in = made;
+            else if (!is_sym && (sf.anchors.count(n) || !AddAnchor(t, sf, anchor_at, n, va))) continue;
             sf.data[dn] = *ref;
-            break;
+            return true;
         }
+        return false;
+    };
+    for (auto& [dn, dva] : t.cfg.data) {
+        if (skip.count(dn) || !sf.data[dn].in.empty() || sf.data[dn].xtlid || !dva) continue;
+        if (!sign(dn, dva, FindRef)) sign(dn, dva, FindTableRef);
         for (auto& [id, va] : t.img.Exports())
             if (va == dva) sf.data[dn].xtlid = id;
         if (sf.data[dn].in.empty() && !sf.data[dn].xtlid)
@@ -861,6 +911,8 @@ std::string WriteData(const DataRef& d) {
     if (!d.in.empty()) {
         const char* op = d.imm ? "imm" : "disp";
         e = std::string("in = \"") + d.in + "\", insn = " + std::to_string(d.insn) + ", op = \"" + op + "\"";
+        for (size_t i = 0; i < d.deref.size(); i++) e += (i ? ", " : ", deref = [") + Hex(d.deref[i]);
+        if (!d.deref.empty()) e += "]";
     }
     if (d.xtlid) e += (e.empty() ? "" : ", ") + std::string("xtlid = ") + Hex(d.xtlid);
     return "{" + e + "}";
@@ -879,7 +931,8 @@ std::string SigFileText(SigFile& sf) {
         "# which holds no such pointer. ret = stack bytes its rets pop, regs = registers it reads before it writes\n"
         "# them. A function the bytes do not find is matched by k; ret and regs then show a changed convention.\n"
         "# [anchors] functions only used to find data. [data] in = function, insn = instruction index, op = operand,\n"
-        "# xtlid = the id .XTLID lists the address under, used when in finds nothing.\n";
+        "# deref = offsets of the dwords then read in turn, for data behind a table, xtlid = the id .XTLID lists the\n"
+        "# address under, used when in finds nothing.\n";
     s += "\n[symbols]\n";
     for (auto& n : sf.names) s += n + " = " + WriteSig(sf.symbols[n]) + "\n";
     s += "\n[anchors]\n";
@@ -1211,6 +1264,13 @@ Sig* SigNamed(SigFile& sf, const std::string& name) {
     return nullptr;
 }
 
+// the dword at each offset in turn from a; 0 once one is unmapped
+uint32_t Follow(const xbe::Image& x, uint32_t a, const std::vector<uint32_t>& deref) {
+    for (uint32_t off : deref)
+        if (!a || !x.Read32(a + off, a)) return 0;
+    return a;
+}
+
 std::map<std::string, uint32_t> ResolveData(const Image& img, SigFile& sf,
                                             const std::map<std::string, uint32_t>& found,
                                             const std::set<std::string>& loose, std::vector<std::string>& report) {
@@ -1218,7 +1278,10 @@ std::map<std::string, uint32_t> ResolveData(const Image& img, SigFile& sf,
     for (auto& [k, d] : sf.data) {
         data[k] = 0;
         Sig* sig = SigNamed(sf, d.in);
-        if (sig && found.count(d.in)) data[k] = img.Operand(found.at(d.in), sig->len, d).value_or(0);
+        if (sig && found.count(d.in)) {
+            uint32_t operand = img.Operand(found.at(d.in), sig->len, d).value_or(0);
+            data[k] = Follow(img.x, operand, d.deref);
+        }
         for (auto& [id, va] : img.Exports())
             if (!data[k] && d.xtlid && id == d.xtlid) data[k] = va;
         // an instruction index only holds in a function the bytes found

@@ -78,8 +78,8 @@ void OptionsUi(double fps) {
 
     ImGui::TextUnformatted("Affichage");
     ImGui::Checkbox("Synchronisation verticale", &s.vsync);
-    static const uint32_t kCaps[] = {30, 60, 120, 144, 0};
-    static const char* const kCapNames[] = {"30", "60", "120", "144", "Sans limite"};
+    static const uint32_t kCaps[] = {30, 60, 120, 144, app::kFpsCapRefresh, 0};
+    static const char* const kCapNames[] = {"30", "60", "120", "144", "Écran", "Sans limite"};  // Écran : juste sous sa fréquence
     Choice("Images par seconde au plus", s.fps_cap, kCaps, kCapNames, int(std::size(kCaps)));
     ImGui::Separator();
 

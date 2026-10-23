@@ -42,6 +42,15 @@ bool Analysis::Decode(uint32_t va, ZydisDecodedInstruction& insn, ZydisDecodedOp
     uint32_t avail = 0;
     const uint8_t* p = Bytes(va, avail);
     if (!p || !avail) return false;
+    // an image keeps a section's trailing zeros out of its file data, and an instruction's last bytes may be among them
+    uint8_t padded[15] = {};
+    const xbe::Section* s = img.SectionAt(va);
+    uint32_t room = std::min<uint32_t>(s->va + s->vsize - va, sizeof(padded));
+    if (avail < room) {
+        std::copy_n(p, avail, padded);
+        p = padded;
+        avail = room;
+    }
     return ZYAN_SUCCESS(ZydisDecoderDecodeFull(&dec_, p, std::min<uint32_t>(avail, 15), &insn, ops));
 }
 
@@ -180,6 +189,7 @@ bool Analysis::Walk(uint32_t entry, bool trusted, std::vector<uint32_t>* calls) 
     auto conflict = [&](uint32_t va, uint32_t len) {
         for (uint32_t i = 0; i < len; i++) {
             uint32_t a = va + i;
+            if (i && InTail(a)) continue;
             if (!IsCode(a)) return true;
             uint8_t c = cover_[a - lo_];
             if (c == 3 || (c == 1 && i) || (c == 2)) return true;
@@ -216,7 +226,8 @@ bool Analysis::Walk(uint32_t entry, bool trusted, std::vector<uint32_t>* calls) 
             if (conflict(va, insn.len)) {
                 // real control flow wins over a guessed entry decoded across these bytes: both decodes are kept
                 bool data = false;
-                for (uint32_t i = 0; i < insn.len; i++) data |= !IsCode(va + i) || cover_[va + i - lo_] == 3;
+                for (uint32_t i = 0; i < insn.len; i++)
+                    data |= !(i && InTail(va + i)) && (!IsCode(va + i) || cover_[va + i - lo_] == 3);
                 if (!trusted) return false;
                 if (data) break;
             }

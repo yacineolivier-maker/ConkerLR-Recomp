@@ -753,8 +753,33 @@ KERNEL_EXPORT(200, NtFsControlFile, 10) {
     return kSuccess;
 }
 
+// IOCTL_SCSI_PASS_THROUGH_DIRECT: the reply goes to the data buffer the SCSI_PASS_THROUGH_DIRECT names
+constexpr uint32_t kScsiPassThroughDirect = 0x4D014;
+constexpr uint32_t kSptdTransferLength = 0xC;
+constexpr uint32_t kSptdDataBuffer = 0x14;
+constexpr uint32_t kSptdCdb = 0x1C;
+constexpr uint8_t kModeSense10 = 0x5A;
+constexpr uint8_t kXboxSecurityPage = 0x3E;
+constexpr uint32_t kSecurityPageBytes = 13;  // mode header, page code and length, then the three bytes XAPI checks
+
+// XAPI starts a title whose media must be an Xbox DVD only once the drive's security page reports an
+// authenticated disc (page bytes 2 and 4 set, byte 3 one); the game files stand in for that disc
+static void ScsiPassThrough(uint32_t sptd) {
+    uint32_t cdb = sptd + kSptdCdb;
+    if (G<uint8_t>(cdb) != kModeSense10 || (G<uint8_t>(cdb + 2) & 0x3F) != kXboxSecurityPage) return;
+    uint32_t data = R32(sptd + kSptdDataBuffer), n = R32(sptd + kSptdTransferLength);
+    if (!data || n < kSecurityPageBytes || n > 0xFF) return;
+    std::memset(HostPtr(data), 0, n);
+    G<uint8_t>(data + 1) = uint8_t(n - 2);  // mode data length, big endian
+    G<uint8_t>(data + 8) = kXboxSecurityPage;
+    G<uint8_t>(data + 9) = uint8_t(n - 10);
+    G<uint8_t>(data + 10) = 1;
+    G<uint8_t>(data + 11) = 1;
+    G<uint8_t>(data + 12) = 1;
+}
+
 KERNEL_EXPORT(196, NtDeviceIoControlFile, 10) {
-    uint32_t iosb = a[4], code = a[5], out = a[8], out_len = a[9];
+    uint32_t iosb = a[4], code = a[5], in = a[6], out = a[8], out_len = a[9];
     LOG_FIRST(16, "NtDeviceIoControlFile: code %08X", code);
     if (out && out_len) std::memset(HostPtr(out), 0, out_len);
     if (code == 0x70000 && out_len >= 0x18) {  // IOCTL_DISK_GET_DRIVE_GEOMETRY
@@ -764,6 +789,7 @@ KERNEL_EXPORT(196, NtDeviceIoControlFile, 10) {
         W32(out + 16, 63);
         W32(out + 20, 512);
     }
+    if (code == kScsiPassThroughDirect && in) ScsiPassThrough(in);
     IoStatus(iosb, kSuccess, out_len);
     return kSuccess;
 }

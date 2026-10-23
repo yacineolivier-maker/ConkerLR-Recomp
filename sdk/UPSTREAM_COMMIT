@@ -1,3 +1,5 @@
 40e9c35
 # repris depuis TGP482/XboxXBERecomp jusqu'a 1bb872b (2026-10-21) : effets DSP (dsp_image), decalage de pixel des cibles,
 # etages fixes sans texture, file audio, mix bins, audio stereo ; la DLL du code de jeu n'est pas reprise
+# repris depuis TGP482/XboxXBERecomp jusqu'a 9a99697 (2026-10-23) : XDK 4831, cadence calee sur l'ecran (fps_cap = 1),
+# GetRasterStatus, BlockOnNonSurfaceResource, rampe gamma, Reset qui garde les tampons ; RunPushBuffer amont non repris (le notre est plus complet)

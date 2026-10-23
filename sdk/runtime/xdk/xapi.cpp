@@ -5,6 +5,12 @@
 #include "xdk/hle.h"
 #include "xdk/layout.h"
 
+// configs written before the SDK knew the name
+#ifndef SYM_XInputGetCapabilities
+#define SYM_XInputGetCapabilities FFFFFC00
+#define HAS_XInputGetCapabilities 0
+#endif
+
 using namespace kernel;
 
 namespace {
@@ -108,6 +114,27 @@ HLE_STDCALL(XInputGetState, 2) {
     W16(s + 16, uint16_t(p.ly));
     W16(s + 18, uint16_t(p.rx));
     W16(s + 20, uint16_t(p.ry));
+    return 0;
+}
+
+// XINPUT_CAPABILITIES: subtype, reserved, the gamepad's buttons, 8 analog buttons and thumbs, then its 2 motors, each
+// with every bit set: the controller has them all
+HLE_STDCALL(XInputGetCapabilities, 2) {
+    constexpr uint32_t kCapsBytes = 25;
+    constexpr uint8_t kSubtypeGamepad = 1;  // XINPUT_DEVSUBTYPE_GC_GAMEPAD
+    uint32_t port;
+    {
+        std::lock_guard<std::mutex> lock(g_ports_lock);
+        auto it = g_handles.find(a[0]);
+        if (it == g_handles.end()) return 6;  // ERROR_INVALID_HANDLE
+        port = it->second.port;
+    }
+    if (!input::Poll(int(port)).connected) return 1167;  // ERROR_DEVICE_NOT_CONNECTED
+    uint32_t c = a[1];
+    std::memset(HostPtr(c), 0xFF, kCapsBytes);
+    G<uint8_t>(c) = kSubtypeGamepad;
+    W16(c + 1, 0);
+    W16(c + 3, 0x00FF);  // the 8 digital buttons
     return 0;
 }
 

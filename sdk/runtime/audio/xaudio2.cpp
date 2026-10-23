@@ -29,9 +29,11 @@ void StartOutput(std::function<void(float*, uint32_t)> render) {
         wf.wBitsPerSample = 32;
         wf.nBlockAlign = 8;
         wf.nAvgBytesPerSec = kRate * 8;
-        if (FAILED(XAudio2Create(&xa, 0, XAUDIO2_DEFAULT_PROCESSOR)) || FAILED(xa->CreateMasteringVoice(&master)) ||
-            FAILED(xa->CreateSourceVoice(&voice, &wf))) {
-            LOGE("audio: XAudio2 unavailable, no sound");
+        HRESULT hr = XAudio2Create(&xa, 0, XAUDIO2_DEFAULT_PROCESSOR);
+        if (SUCCEEDED(hr)) hr = xa->CreateMasteringVoice(&master);
+        if (SUCCEEDED(hr)) hr = xa->CreateSourceVoice(&voice, &wf);
+        if (FAILED(hr)) {
+            LOGE("audio: XAudio2 unavailable (%08X), no sound", unsigned(hr));
             return;
         }
         voice->Start();

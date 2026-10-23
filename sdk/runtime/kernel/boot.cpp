@@ -156,9 +156,12 @@ bool Boot(std::vector<uint8_t> xbe, const std::string& xbe_name, const std::stri
 
 const char* ImageExe(std::string xbe_path) {
     for (char& c : xbe_path) c = char(std::tolower(uint8_t(c)));
+    // Xbox paths ignore case; a row keeps the xbe's own name, which the code DLL and config lookups compare exactly
     for (auto& [xbe, exe] : app::kGame.images) {
-        size_t n = std::strlen(xbe);
-        if (xbe_path.size() >= n && xbe_path.compare(xbe_path.size() - n, n, xbe) == 0 &&
+        std::string name = xbe;
+        for (char& c : name) c = char(std::tolower(uint8_t(c)));
+        size_t n = name.size();
+        if (xbe_path.size() >= n && xbe_path.compare(xbe_path.size() - n, n, name) == 0 &&
             (xbe_path.size() == n || xbe_path[xbe_path.size() - n - 1] == '\\' || xbe_path[xbe_path.size() - n - 1] == ';'))
             return exe;
     }
