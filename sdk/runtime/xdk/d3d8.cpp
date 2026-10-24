@@ -122,6 +122,14 @@ std::unordered_map<uint32_t, std::shared_ptr<gpu::PixelShader>> g_ps;
 std::array<uint32_t, 3> g_buffers{};  // front, back surfaces
 uint32_t g_buffer_count = 2;
 uint32_t g_depth = 0;
+// vertical blanks a present waits for, as the title's presentation interval asks: D3DPRESENT_INTERVAL_ONE 1, TWO 2,
+// THREE 4, FOUR 8, with IMMEDIATE (0x80000000) alone never waiting. A title paced by a 30 Hz interval steps its game a
+// frame at a time, which runs twice as fast at 60 frames a second
+std::atomic<uint32_t> g_vblanks{1};
+void SetInterval(uint32_t interval) {
+    uint32_t low = interval & 0xF;
+    g_vblanks = low & 8 ? 4 : low & 4 ? 3 : low & 2 ? 2 : 1;
+}
 uint32_t g_scratch_push = 0, g_scratch_size = 0;
 uint32_t g_walk = 0;  // first scratch command not read yet
 
@@ -262,6 +270,7 @@ void SetComplex(uint32_t rs, uint32_t v) {
     W32(kRenderState + rs * 4, v);
     // the hardware methods the XDK pushes for them, which push buffers run with
     auto& m = g_state.simple;
+    if (rs == gpu::kRsPresentationInterval) SetInterval(v);
     switch (rs) {
         case gpu::kRsZEnable: m[0x30C >> 2] = v != 0; break;
         case gpu::kRsStencilEnable: m[0x32C >> 2] = v != 0; break;
@@ -298,6 +307,7 @@ void SetFrameBuffers(const char* caller, uint32_t pp) {
     if (!h) h = 480;
     LOGI("d3d: %s %ux%u format %X buffers %u depth %u format %X interval %X flags %X", caller, w, h, fmt, count,
          auto_depth, depth_fmt, interval, R32(pp + 0x28));
+    SetInterval(interval);
     uint32_t color_fmt = gpu::LinearColorFormat(fmt);
     uint32_t zf = auto_depth ? gpu::LinearDepthFormat(depth_fmt) : 0;
     // surfaces of the same shape are kept: a title wraps their memory in textures of its own across a Reset
@@ -683,7 +693,7 @@ HLE_STDCALL(D3DDevice_Swap, 1) {
     Walk(Dev(kDevPush));  // reports asked for at the end of the frame
     if (g_backend) g_backend->Present(SurfaceOf(g_buffers[1]));
     g_last_present = std::chrono::steady_clock::now();
-    app::Pace();
+    app::Pace(g_vblanks);
     // like the XDK, the surfaces stay put and their memory rotates: titles keep back buffer pointers and copy its data
     uint32_t last = g_buffers[g_buffer_count - 1], data = R32(last + 4), lk = R32(last + 8);
     for (uint32_t i = g_buffer_count - 1; i > 0; i--) {

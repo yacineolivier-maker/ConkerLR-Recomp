@@ -247,7 +247,7 @@ uint32_t RefreshRate() {
 
 }  // namespace
 
-void Pace() {
+void Pace(uint32_t vblanks) {
     using clock = std::chrono::steady_clock;
     static clock::time_point next = clock::now();
     uint32_t cap = Get().fps_cap;
@@ -255,6 +255,7 @@ void Pace() {
     // refresh
     constexpr uint32_t kRefreshMargin = 3;
     if (cap == kFpsCapRefresh) cap = RefreshRate() > kRefreshMargin ? RefreshRate() - kRefreshMargin : 0;
+    if (vblanks > 1 && (!cap || cap > 60 / vblanks)) cap = 60 / vblanks;
     auto now = clock::now();
     if (!cap) {
         next = now;

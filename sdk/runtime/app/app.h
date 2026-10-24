@@ -96,7 +96,8 @@ struct GameInfo {
 };
 extern const GameInfo kGame;
 
-// sleeps out the rest of the frame for the fps cap
-void Pace();
+// sleeps out the rest of the frame for the fps cap, and for the title's pace: no faster than one frame every
+// vblanks of the console's 60 Hz
+void Pace(uint32_t vblanks = 1);
 
 }  // namespace app

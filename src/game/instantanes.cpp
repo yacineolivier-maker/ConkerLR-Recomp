@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
@@ -229,8 +230,18 @@ void SuivreReprise() {
         return;
     }
     if (++r.images < kAttente) return;
-    std::memcpy(kernel::HostPtr(joueur + 0x78), r.pos, sizeof(r.pos));
-    LOGI("instantanés : Conker replacé en %.0f %.0f %.0f", r.pos[0], r.pos[1], r.pos[2]);
+    if (r.images == kAttente) {
+        float avant[3];
+        std::memcpy(avant, kernel::HostPtr(joueur + 0x78), sizeof(avant));
+        std::memcpy(kernel::HostPtr(joueur + 0x78), r.pos, sizeof(r.pos));
+        LOGI("instantanés : Conker replacé de %.0f %.0f %.0f en %.0f %.0f %.0f", avant[0], avant[1], avant[2], r.pos[0],
+             r.pos[1], r.pos[2]);
+        return;
+    }
+    if (r.images < kAttente + 60) return;
+    float apres[3];
+    std::memcpy(apres, kernel::HostPtr(joueur + 0x78), sizeof(apres));
+    LOGI("instantanés : 1 s plus tard, Conker en %.0f %.0f %.0f", apres[0], apres[1], apres[2]);
     r.active = false;
 }
 
@@ -246,6 +257,16 @@ void Instantanes(X86Context& ctx, uint8_t* base) {
     if (int d = g_demande.exchange(0)) {
         if (d == 1) Enregistrer(ctx, g_demande_emplacement);
         else Reprendre(ctx, g_demande_emplacement);
+    }
+    // essais : XBE_INSTANTANE=<n> reprend l'emplacement n une fois la première partie en cours depuis 2 s
+    static int essai = [] {
+        const char* v = std::getenv("XBE_INSTANTANE");
+        return v ? std::atoi(v) : 0;
+    }();
+    static int essai_images = 0;
+    if (essai > 0 && essai <= kEmplacements && !PasEnJeu() && ++essai_images == 120) {
+        Reprendre(ctx, essai - 1);
+        essai = 0;
     }
     SuivreReprise();
 }
