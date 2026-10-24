@@ -328,3 +328,8 @@ call = "GameTrace"  # src/game/diag_hooks.cpp : XBE_TRACE_JEU
 [[hook]]
 at = 0x2A9442
 call = "ForceLevel"  # src/game/diag_hooks.cpp : test XBE_NIVEAU
+
+# instantanés (src/game/instantanes.cpp) : lecture des manettes, après les XInputGetState, une fois par image
+[[hook]]
+at = 0x3D1B16
+call = "Instantanes"

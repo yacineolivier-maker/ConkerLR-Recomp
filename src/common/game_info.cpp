@@ -19,10 +19,20 @@ bool RenduKey(uint32_t vk);
 // options.cpp
 bool OptionsKey(uint32_t vk);
 void OptionsUi(double fps);
+// src/game/instantanes.cpp
+bool InstantanesTouche(uint32_t vk);
+void InstantanesPad(int port, input::Pad& pad);
+void InstantanesUi();
 
 void Pad(int port, input::Pad& pad) {
     AutoPad(port, pad);
     ClavierSouris(port, pad);
+    InstantanesPad(port, pad);  // en dernier : Back du clavier compris
+}
+
+void Ui(double fps) {
+    OptionsUi(fps);
+    InstantanesUi();
 }
 
 void Init() {
@@ -33,7 +43,7 @@ void Init() {
 bool Message(void*, uint32_t msg, uintptr_t wp, intptr_t lp, intptr_t* result) {
     if (ClavierMessage(msg, wp, lp, result)) return true;
     constexpr uint32_t kKeyDown = 0x0100;  // WM_KEYDOWN
-    if (msg != kKeyDown || !(RenduKey(uint32_t(wp)) || OptionsKey(uint32_t(wp)))) return false;
+    if (msg != kKeyDown || !(RenduKey(uint32_t(wp)) || OptionsKey(uint32_t(wp)) || InstantanesTouche(uint32_t(wp)))) return false;
     *result = 0;
     return true;
 }
@@ -63,7 +73,7 @@ const app::GameInfo app::kGame = {
     .loaded = game::StartApu,
     .window = game::ClavierFenetre,
     .message = game::Message,
-    .ui = game::OptionsUi,
+    .ui = game::Ui,
     .pad = game::Pad,
     .rumble = nullptr,
 };
