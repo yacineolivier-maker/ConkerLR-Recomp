@@ -33,6 +33,10 @@ struct Target {
     std::vector<uint8_t> read;    // what Sync left in guest memory
     Microsoft::WRL::ComPtr<ID3D12Resource> fb;  // copy read by draws that sample the target they render to
     D3D12_RESOURCE_STATES fb_state = D3D12_RESOURCE_STATE_COPY_DEST;
+    // a depth target's bytes as the console's memory holds them (stencil, then depth from its low byte), for colour reads
+    Microsoft::WRL::ComPtr<ID3D12Resource> raw;
+    D3D12_RESOURCE_STATES raw_state = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    uint32_t raw_view = ~0u;
     DXGI_FORMAT fmt = DXGI_FORMAT_B8G8R8A8_UNORM;
     float range = 1;         // colour held divided by it until the extension resolves the target
     uint64_t tag = ~0ull;    // the extension's

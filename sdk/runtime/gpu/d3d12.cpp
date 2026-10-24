@@ -152,6 +152,34 @@ O vs(uint id : SV_VertexID) {
 float psmain(O i) : SV_Depth { return img.SampleLevel(ps, i.uv, 0); }
 )";
 
+// DepthBytes: D24S8 as its 32 bit words, byte 0 stencil, bytes 1 to 3 depth, in r g b a
+const char* kDepthBytesHlsl = R"(
+Texture2D<float> dep : register(t0);
+Texture2D<uint2> sten : register(t1);
+float4 vs(uint id : SV_VertexID) : SV_Position {
+    float2 t = float2((id << 1) & 2, id & 2);
+    return float4(t * float2(2, -2) + float2(-1, 1), 0, 1);
+}
+float4 psmain(float4 p : SV_Position) : SV_Target {
+    int3 xy = int3(p.xy, 0);
+    uint z = (uint)round(saturate(dep.Load(xy)) * 16777215.0);
+    return float4(sten.Load(xy).g, z & 255, (z >> 8) & 255, z >> 16) / 255.0;
+}
+)";
+
+// the view mapping of a 32 bit colour format read over DepthBytes' r g b a (memory bytes 0 to 3); 0 for other formats
+UINT DepthBytesMapping(uint32_t format) {
+    switch (format) {
+        case 0x06: case 0x12: return D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(2, 1, 0, 3);  // A8R8G8B8
+        case 0x07: case 0x1E:                                                               // X8R8G8B8
+            return D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(2, 1, 0, D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_1);
+        case 0x3A: case 0x3F: return D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(0, 1, 2, 3);  // memory R G B A
+        case 0x3B: case 0x40: return D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(1, 2, 3, 0);  // memory A R G B
+        case 0x3C: case 0x41: return D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(3, 2, 1, 0);  // memory A B G R
+        default: return 0;
+    }
+}
+
 float Bits(uint32_t v) {
     float f;
     std::memcpy(&f, &v, 4);
@@ -489,6 +517,7 @@ private:
     void DrawFullScreen(ID3D12PipelineState* pso, D3D12_GPU_VIRTUAL_ADDRESS cb, uint32_t srv_slot,
                         std::optional<uint32_t> sampler_slot = {});
     ID3D12Resource* Feedback(Target& t) override;
+    ID3D12Resource* DepthBytes(Target& t);
     void Resolve(Target& t) {
         if (t.range != 1 && ext_) ext_->Resolve(*this, t);
     }
@@ -1113,6 +1142,10 @@ void D3D12Backend::ReleaseTarget(std::unordered_map<uint64_t, Target>::iterator 
     (it->second.depth ? free_dsv_ : free_rtv_).push_back(it->second.view);
     CurrentFrame().garbage.push_back(it->second.res);
     if (it->second.fb) CurrentFrame().garbage.push_back(it->second.fb);
+    if (it->second.raw) {
+        CurrentFrame().garbage.push_back(it->second.raw);
+        free_rtv_.push_back(it->second.raw_view);
+    }
     targets_.erase(it);
 }
 
@@ -1620,6 +1653,47 @@ bool D3D12Backend::Pass(const char* hlsl, const char* entry, DXGI_FORMAT rtv, D3
     return true;
 }
 
+// the depth target as the console's colour read of its memory, remade at each read; null when it can't be
+ID3D12Resource* D3D12Backend::DepthBytes(Target& t) {
+    DropFastDraw();
+    if (!t.raw) {
+        if (free_rtv_.empty()) return nullptr;
+        D3D12_HEAP_PROPERTIES hp{D3D12_HEAP_TYPE_DEFAULT};
+        D3D12_RESOURCE_DESC td = Texture2DDesc(DXGI_FORMAT_R8G8B8A8_UNORM, t.w, t.h);
+        td.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        t.raw_state = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        if (FAILED(dev_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td, t.raw_state, nullptr,
+                                                 IID_PPV_ARGS(&t.raw)))) {
+            return nullptr;
+        }
+        t.raw_view = free_rtv_.back();
+        free_rtv_.pop_back();
+        dev_->CreateRenderTargetView(t.raw.Get(), nullptr, Cpu(rtv_heap_.Get(), t.raw_view, rtv_inc_));
+    }
+    ID3D12PipelineState* pso = EnsurePassPipeline(kDepthBytesHlsl, "psmain", DXGI_FORMAT_R8G8B8A8_UNORM, -1);
+    if (!pso) return nullptr;
+    Transition(t.res.Get(), t.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    Transition(t.raw.Get(), t.raw_state, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    uint32_t slot = AllocSrvSlots(2);
+    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+    sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sv.Texture2D.MipLevels = 1;
+    sv.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+    dev_->CreateShaderResourceView(t.res.Get(), &sv, Cpu(srv_heap_.Get(), slot, srv_inc_));
+    sv.Format = DXGI_FORMAT_X24_TYPELESS_G8_UINT;
+    sv.Texture2D.PlaneSlice = 1;
+    dev_->CreateShaderResourceView(t.res.Get(), &sv, Cpu(srv_heap_.Get(), slot + 1, srv_inc_));
+    D3D12_CPU_DESCRIPTOR_HANDLE rh = Cpu(rtv_heap_.Get(), t.raw_view, rtv_inc_);
+    cl_->OMSetRenderTargets(1, &rh, FALSE, nullptr);
+    bound_rt_ = bound_ds_ = nullptr;
+    SetFullViewport(t.w, t.h);
+    Alloc cb = Upload(256, 256);
+    DrawFullScreen(pso, cb.gpu, slot);
+    Transition(t.raw.Get(), t.raw_state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    return t.raw.Get();
+}
+
 // a copy of the target to read while drawing to it
 ID3D12Resource* D3D12Backend::Feedback(Target& t) {
     DropFastDraw();
@@ -1757,6 +1831,21 @@ ID3D12Resource* D3D12Backend::BindTargetTexture(const State& s, int stage, const
                                                 DrawTextures& stages) {
     TexInfo& info = stages.info[stage];
     D3D12_SHADER_RESOURCE_VIEW_DESC& sv = stages.sv[stage];
+    // the depth surface read as colour (the glow pass masks by stencil): its bytes as the console's memory holds them;
+    // draw_ds_ is the last draw's, this one may not test depth
+    if (t.depth && !Format(d.format).depth) {
+        bool own = (s.rs[kRsZEnable] || s.rs[kRsStencilEnable]) && FindTarget(s.zs, true) == &t;
+        UINT map = own ? 0 : DepthBytesMapping(d.format);
+        ID3D12Resource* r = map ? DepthBytes(t) : nullptr;
+        LOG_FIRST(4, "d3d12: depth %08X read as colour format %02X%s", t.data, d.format, r ? "" : ": not done");
+        if (!r) return nullptr;
+        stages.rt[stage] = true;
+        info.flags |= kTexTarget;
+        info.kind = kTex2D;
+        sv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        sv.Shader4ComponentMapping = map;
+        return r;
+    }
     if (&t == draw_ds_) return nullptr;
     bool feedback = &t == draw_rt_;
     stages.rt[stage] = true;
@@ -1969,6 +2058,8 @@ ID3D12Resource* D3D12Backend::BindTexture(const State& s, int stage, DrawTexture
     bool box = true;
     if (ext_) ext_->Sample(d.data, fi.depth, stage, alt, stages.k[stage], box);
     auto tit = targets_.find(SizedTargetKey(d.data, fi.depth, d.width, d.height) | alt);
+    // a colour read of a depth surface
+    if (tit == targets_.end() && !fi.depth && !alt) tit = targets_.find(SizedTargetKey(d.data, true, d.width, d.height));
     if (tit != targets_.end() && !d.cube && d.depth == 1 && !fi.compressed) {
         if (!TargetOutlived(tit->second)) return BindTargetTexture(s, stage, d, tit->second, box, stages);
         LOG_FIRST(16, "d3d12: target %08X %ux%u no longer drawn and its memory rewritten: read as a texture", d.data, d.width, d.height);
