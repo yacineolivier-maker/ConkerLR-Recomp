@@ -21,6 +21,14 @@ code_sections = [".text", "D3DX", "XNET", "XONLINE", "DSOUND", "XMV", "WMADEC", 
 0x4C4D09 = ""  # méthode CDirectSoundStream atteinte par jmp depuis son wrapper
 0x4C4D5B = ""  # méthode CDirectSoundStream atteinte par jmp depuis son wrapper
 0x4C5907 = ""  # méthode CDirectSoundStream atteinte par jmp depuis son wrapper
+0xC6A80 = ""  # gestionnaire de messages, référencé seulement depuis une table .rdata (0x5922B0)
+0xD50D0 = ""  # gestionnaire de messages, référencé seulement depuis une table .rdata (0x598BB8)
+0x15A980 = ""  # gestionnaire de messages, référencé seulement depuis une table .rdata (0x592550)
+0x1D4250 = ""  # gestionnaire de messages, référencé seulement depuis une table .rdata (0x597F3C)
+0x1D4C30 = ""  # gestionnaire de messages, référencé seulement depuis une table .rdata (0x597F44)
+0x1E6590 = ""  # gestionnaire de messages, référencé seulement depuis une table .rdata (0x592CC0, coup de poêle)
+0x1EF0C0 = ""  # gestionnaire de messages, référencé seulement depuis une table .rdata (0x592C50)
+0x325200 = ""  # gestionnaire de messages, référencé seulement depuis une table .rdata (0x598BBC)
 
 # functions the host replaces or calls by name, 0 where the image has none
 [symbols]
