@@ -174,7 +174,7 @@ bool Analysis::SledTable(uint32_t jmp_va, const uint32_t* ring, int nring, JumpT
     return !jt.targets.empty();
 }
 
-bool Analysis::Walk(uint32_t entry, bool trusted, std::vector<uint32_t>* calls) {
+bool Analysis::Walk(uint32_t entry, bool trusted, std::vector<uint32_t>* calls, bool overlap) {
     struct Pending {
         uint32_t va;
         Insn insn;
@@ -208,7 +208,7 @@ bool Analysis::Walk(uint32_t entry, bool trusted, std::vector<uint32_t>* calls) 
                 if (trusted) break;
                 return false;
             }
-            if (cover_[va - lo_] != 0 && (!trusted || cover_[va - lo_] == 3)) {
+            if (cover_[va - lo_] != 0 && (!(trusted || overlap) || cover_[va - lo_] == 3)) {
                 if (trusted) break;
                 return false;
             }
@@ -228,7 +228,7 @@ bool Analysis::Walk(uint32_t entry, bool trusted, std::vector<uint32_t>* calls) 
                 bool data = false;
                 for (uint32_t i = 0; i < insn.len; i++)
                     data |= !(i && InTail(va + i)) && (!IsCode(va + i) || cover_[va + i - lo_] == 3);
-                if (!trusted) return false;
+                if (!trusted && (!overlap || data)) return false;
                 if (data) break;
             }
             local.push_back({va, insn});
@@ -541,7 +541,25 @@ void Analysis::Run() {
         }
     }
     EhContinuations();
-    // every direct call from decoded code names a function
+    NameCallTargets();
+    if (cfg.pointer_seeds) {
+        SeedPointers(true);
+        SeedTables();
+        NameCallTargets();
+    }
+    size_t bytes = 0, overlaps = 0;
+    for (auto& [va, insn] : insns_) {
+        bytes += insn.len;
+        for (uint32_t i = 1; i < insn.len; i++)
+            if (insns_.count(va + i)) overlaps++;
+    }
+    std::fprintf(stderr, "overlapping decodes: %zu\n", overlaps);
+    std::fprintf(stderr, "total: %zu functions, %zu instructions, %zu code bytes of %u, %zu jump tables, %zu callback entries\n",
+                 functions.size(), insns_.size(), bytes, hi_ - lo_, jump_tables.size(), imm);
+}
+
+// every direct call from decoded code names a function
+void Analysis::NameCallTargets() {
     for (bool changed = true; changed;) {
         changed = false;
         std::vector<uint32_t> targets;
@@ -557,16 +575,50 @@ void Analysis::Run() {
             changed = true;
         }
     }
-    if (cfg.pointer_seeds) SeedPointers(true);
-    size_t bytes = 0, overlaps = 0;
-    for (auto& [va, insn] : insns_) {
-        bytes += insn.len;
-        for (uint32_t i = 1; i < insn.len; i++)
-            if (insns_.count(va + i)) overlaps++;
+}
+
+// a code pointer stored near a known function's, in a vtable or a descriptor's handler fields, is an entry even
+// where a guessed entry (data decoded as code) took its bytes first: walked letting the two decodes overlap. Rounds
+// until none is found, a new entry vouching for its neighbours
+void Analysis::SeedTables() {
+    size_t added = 0;
+    for (bool more = true; more;) {
+        more = false;
+        std::vector<uint32_t> cands;
+        for (auto& s : img.sections) {
+            bool code = false;
+            for (auto& n : cfg.code_sections) code |= s.name == n;
+            for (auto& p : cfg.code_prefixes) code |= s.name.rfind(p, 0) == 0;
+            if (code) continue;
+            uint32_t start = s.raw, end = s.raw + s.rsize;
+            for (uint32_t o = start; o + 4 <= end; o += 4) {
+                uint32_t v = img.U32(o);
+                if (!IsCode(v) || functions.count(v)) continue;
+                bool near_function = false;
+                for (int k = -24; k <= 24 && !near_function; k += 4)
+                    if (k && int64_t(o) + k >= start && o + k + 4 <= end) near_function = functions.count(img.U32(uint32_t(o + k))) != 0;
+                if (near_function) cands.push_back(v);
+            }
+        }
+        std::sort(cands.begin(), cands.end());
+        cands.erase(std::unique(cands.begin(), cands.end()), cands.end());
+        for (uint32_t c : cands) {
+            // bytes nothing decoded yet, after padding or a return that is not the tail of a decoded instruction: an
+            // instruction already decoded there is a label a stray value names, and SeedPointers judged those
+            if (functions.count(c) || cover_[c - lo_] != 0 || c <= lo_ || cover_[c - 1 - lo_] == 2) continue;
+            int64_t o = img.Offset(c);
+            uint8_t b = o >= 0 ? img.file[size_t(o)] : 0;
+            if (b == 0xCC || b == 0x00 || !PlausibleEntry(c)) continue;
+            std::vector<uint32_t> calls;
+            if (Walk(c, false, &calls, true)) {
+                functions.insert(c);
+                added++;
+                more = true;
+                Adopt(calls, false);
+            }
+        }
     }
-    std::fprintf(stderr, "overlapping decodes: %zu\n", overlaps);
-    std::fprintf(stderr, "total: %zu functions, %zu instructions, %zu code bytes of %u, %zu jump tables, %zu callback entries\n",
-                 functions.size(), insns_.size(), bytes, hi_ - lo_, jump_tables.size(), imm);
+    std::fprintf(stderr, "table seeds: %zu\n", added);
 }
 
 void Analysis::MakeFunction(uint32_t va) {

@@ -89,8 +89,11 @@ public:
 
 private:
     bool DecodeFlow(uint32_t va, Insn& out, JumpTable* jt);
-    bool Walk(uint32_t entry, bool trusted, std::vector<uint32_t>* calls);
+    // overlap: an untrusted entry that may decode across bytes an earlier guess decoded, as a trusted one does
+    bool Walk(uint32_t entry, bool trusted, std::vector<uint32_t>* calls, bool overlap = false);
     void SeedPointers(bool late = false);
+    void SeedTables();
+    void NameCallTargets();
     bool PlausibleEntry(uint32_t va) const;
     void Adopt(const std::vector<uint32_t>& calls, bool trusted);
     void GapFill();
