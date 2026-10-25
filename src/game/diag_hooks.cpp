@@ -1,10 +1,13 @@
 // Hooks de diagnostic (config [[hook]]) : journalisent l'état de sous-systèmes du jeu en cours de mise au point.
+#include <imgui.h>
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
 #include <string>
 
+#include "app/app.h"
 #include "core/log.h"
 #include "kernel/kernel.h"
 #include "xdk/hle.h"
@@ -53,6 +56,26 @@ void ForceLevel(X86Context& ctx, uint8_t* base) {
     LOGI("niveau : test, niveau %u (%s) chargé à la place", id, want);
 }
 
+// essais (XBE_AUTOPAD ou XBE_ARRIERE_PLAN) : « Niveau N : nom » du niveau en cours ([0x7FA1F8]) en haut de l'écran,
+// pour reconnaître les niveaux d'une tournée à l'œil
+namespace game {
+void EtiquetteNiveau() {
+    static const bool essai = std::getenv("XBE_AUTOPAD") || app::Background();
+    if (!essai) return;
+    uint32_t level = kernel::R32(0x7FA1F8);
+    uint32_t nom = level < 96 ? kernel::R32(0x69CF90 + level * 4) : 0;
+    char texte[96];
+    std::snprintf(texte, sizeof(texte), "Niveau %u : %s", level, nom ? kernel::ReadCString(nom).c_str() : "?");
+    ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x * 0.5f, 8), ImGuiCond_Always, ImVec2(0.5f, 0));
+    ImGui::SetNextWindowBgAlpha(0.6f);
+    ImGui::Begin("##niveau", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
+                     ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
+    ImGui::SetWindowFontScale(1.8f);
+    ImGui::TextUnformatted(texte);
+    ImGui::End();
+}
+}  // namespace game
 
 // entrée de la trace de débogage du jeu (0x18B30, printf vers OutputDebugString, muette sans [0x84725D]) :
 // XBE_TRACE_JEU=<octets drapeaux en hexadécimal, ex. 846FF3,846FFB> allume la trace et ces drapeaux de sous-systèmes

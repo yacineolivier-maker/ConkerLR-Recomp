@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 
@@ -42,8 +43,18 @@ uint32_t LanguageCode() {
     return 1;
 }
 
+bool Background() {
+    static const bool on = std::getenv("XBE_ARRIERE_PLAN") != nullptr;
+    return on;
+}
+
 void Load() {
     Settings& s = Get();
+    if (Background()) {
+        s.display_mode = DisplayMode::Windowed;
+        s.width = 960;
+        s.height = 540;
+    }
     toml::table t;
     try {
         t = toml::parse_file(File().string());
@@ -67,6 +78,11 @@ void Load() {
         else *o.value = t[o.key].value_or(*o.value);
     }
     if (kGame.load) kGame.load(&t);
+    if (Background()) {
+        s.display_mode = DisplayMode::Windowed;
+        s.width = 960;
+        s.height = 540;
+    }
 }
 
 namespace {

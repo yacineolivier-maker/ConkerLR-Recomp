@@ -11,6 +11,7 @@
 #include <thread>
 #include <vector>
 
+#include "app/app.h"
 #include "audio/audio.h"
 #include "core/log.h"
 
@@ -36,6 +37,7 @@ void StartOutput(std::function<void(float*, uint32_t)> render) {
             LOGE("audio: XAudio2 unavailable (%08X), no sound", unsigned(hr));
             return;
         }
+        if (app::Background()) master->SetVolume(0);
         voice->Start();
         constexpr uint32_t kFrames = kRate / 100;
         constexpr uint32_t kMinQueued = 3;

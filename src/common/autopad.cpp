@@ -1,7 +1,7 @@
 // Manette automatique pour les essais sans joueur : XBE_AUTOPAD="secondes:bouton[:durée];..." appuie sur un
 // bouton de la manette 1 à l'instant donné (durée 0,2 s par défaut). Boutons : a b x y black white lt rt start
 // back up down left right, ou lx/ly/rx/ry=valeur (-32768..32767). Préfixe p2. à p4. : une autre manette, branchée dès
-// le début (ex. 30:p2.start). Sans la variable, rien ne change.
+// le début (ex. 30:p2.start). Les vraies manettes sont alors ignorées. Sans la variable, rien ne change.
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -54,6 +54,7 @@ const std::vector<Press>& Script() {
 void AutoPad(int port, input::Pad& pad) {
     const auto& script = Script();
     if (script.empty()) return;
+    pad = input::Pad{};  // essai : les vraies manettes ne s'en mêlent pas
     bool used = port == 0;
     for (const Press& p : script) used |= p.port == port;
     if (!used) return;

@@ -23,6 +23,7 @@ void OptionsUi(double fps);
 bool InstantanesTouche(uint32_t vk);
 void InstantanesPad(int port, input::Pad& pad);
 void InstantanesUi();
+void EtiquetteNiveau();  // src/game/diag_hooks.cpp
 
 void Pad(int port, input::Pad& pad) {
     AutoPad(port, pad);
@@ -33,6 +34,7 @@ void Pad(int port, input::Pad& pad) {
 void Ui(double fps) {
     OptionsUi(fps);
     InstantanesUi();
+    EtiquetteNiveau();
 }
 
 void Init() {

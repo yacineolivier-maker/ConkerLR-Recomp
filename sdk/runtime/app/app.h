@@ -30,6 +30,9 @@ struct Settings {
 Settings& Get();
 uint32_t LanguageCode();  // XC_LANGUAGE: 1 English, 2 Japanese, 3 German, 4 French, 5 Spanish, 6 Italian
 void Load();
+// XBE_ARRIERE_PLAN: a test run beside someone's work: a small window that is never activated, no sound, the real
+// pads left to their own windows
+bool Background();
 void Save();
 void LogSettings();  // every setting, as the settings file has them
 void LogSystem();    // the machine and the settings, at a run's start

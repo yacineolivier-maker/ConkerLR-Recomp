@@ -62,7 +62,7 @@ bool Read(const std::filesystem::path& path, std::vector<uint32_t>& pixels, UINT
 }  // namespace
 
 bool OpenSplash() {
-    if (std::wcsstr(GetCommandLineW(), L"--relaunched")) return false;
+    if (std::wcsstr(GetCommandLineW(), L"--relaunched") || Background()) return false;  // no splash over the desktop in the background
     std::vector<uint32_t> pixels;
     UINT w = 0, h = 0;
     std::filesystem::path path;

@@ -137,8 +137,12 @@ void ApplyNow() {
         int w = r.right - r.left, h = r.bottom - r.top;
         const RECT& a = mi.rcWork;
         SetWindowLongPtrW(g_hwnd, GWL_STYLE, WS_OVERLAPPEDWINDOW | visible);
-        SetWindowPos(g_hwnd, HWND_NOTOPMOST, a.left + (a.right - a.left - w) / 2, a.top + (a.bottom - a.top - h) / 2, w, h,
-                     SWP_FRAMECHANGED);
+        // in the background: in the work area's bottom right corner, without taking the focus
+        if (Background())
+            SetWindowPos(g_hwnd, HWND_NOTOPMOST, a.right - w, a.bottom - h, w, h, SWP_FRAMECHANGED | SWP_NOACTIVATE);
+        else
+            SetWindowPos(g_hwnd, HWND_NOTOPMOST, a.left + (a.right - a.left - w) / 2, a.top + (a.bottom - a.top - h) / 2,
+                         w, h, SWP_FRAMECHANGED);
     } else {
         const RECT& m = mi.rcMonitor;
         SetWindowLongPtrW(g_hwnd, GWL_STYLE, WS_POPUP | visible);
@@ -185,8 +189,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case kOpenWindow:
             CloseSplash();
             if (wp) ApplyNow();
-            ShowWindow(hwnd, SW_SHOW);
-            SetForegroundWindow(hwnd);
+            ShowWindow(hwnd, Background() ? SW_SHOWNOACTIVATE : SW_SHOW);
+            if (!Background()) SetForegroundWindow(hwnd);
             return 0;
         case WM_CLOSE:
             DestroyWindow(hwnd);
@@ -305,7 +309,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         app::ApplyNow();
     } else if (!splash) {
         app::ApplyNow();
-        ShowWindow(app::g_hwnd, SW_SHOW);
+        ShowWindow(app::g_hwnd, app::Background() ? SW_SHOWNOACTIVATE : SW_SHOW);
     }
 
     IMGUI_CHECKVERSION();
