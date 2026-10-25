@@ -1,7 +1,9 @@
 #include "gpu/vertex.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
+#include <string>
 #include <unordered_set>
 
 #include <dxgiformat.h>
@@ -261,9 +263,12 @@ int CollectRegs(const State& s, const VertexShader& layout, int* regs, Assembled
     return nregs;
 }
 
+// the stream's stride, unless the declaration's aligned vertex is longer: the title gave the elements' sum (30 bytes
+// for BrontoCavern's particles) while it writes them padded as a structure (32)
 uint32_t StrideOf(const State& s, const VertexShader& layout, const VertexShader::Input& in) {
     const auto& st = s.streams[size_t(in.stream)];
-    return st.stride ? st.stride : layout.stream_stride[size_t(in.stream)];
+    uint32_t decl = layout.stream_stride[size_t(in.stream)];
+    return st.stride ? std::max(st.stride, decl) : decl;
 }
 
 constexpr uint32_t kStrideAlign = 4;            // the input assembler reads strides in dwords
@@ -286,9 +291,17 @@ bool RawReadable(const State& s, const Inputs& inputs) {
                         in.offset % std::min<uint32_t>(he.bytes, 4) == 0;
         if (!readable) {
             static std::unordered_set<uint32_t> told;
-            if (told.size() < 64 && told.insert(in.type << 16 | (stride & 0xFFFF)).second)
-                LOG_FIRST(64, "vertex: converted on the CPU: v%d type %02X offset %u stride %u", inputs.regs[k], in.type,
-                          in.offset, stride);
+            if (told.size() < 64 && told.insert(in.type << 16 | (stride & 0xFFFF)).second) {
+                std::string decl;
+                for (uint32_t t : inputs.layout.decl) {
+                    char h[12];
+                    std::snprintf(h, sizeof(h), " %X", t);
+                    decl += h;
+                }
+                LOG_FIRST(64, "vertex: converted on the CPU: v%d type %02X offset %u stride %u (stream %u, declaration %u:%s)",
+                          inputs.regs[k], in.type, in.offset, stride, s.streams[size_t(in.stream)].stride,
+                          inputs.layout.stream_stride[size_t(in.stream)], decl.c_str());
+            }
             return false;
         }
     }

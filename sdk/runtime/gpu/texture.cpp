@@ -516,17 +516,33 @@ static uint32_t TypeSize(uint32_t t) {
     }
 }
 
+// bytes an element's components are aligned on: 4 for floats, colours and packed normals, 2 for shorts, 1 for bytes
+static uint32_t TypeAlign(uint32_t t) {
+    uint32_t kind = t & 15;
+    return kind == 1 || kind == 5 ? 2 : kind == 4 ? 1 : 4;
+}
+
+// the elements of a stream are laid out as the C structure the title writes them from: each on its components' own
+// alignment and the vertex padded to the largest (BrontoCavern's particles, FLOAT3 D3DCOLOR SHORT2 PBYTE2 FLOAT2: the
+// FLOAT2 at 24, 32 bytes a vertex; packed end to end at 22 and 30, the quads after the first stretched across the
+// screen in cyan sheets)
 void ParseDeclaration(VertexShader& vs) {
     int stream = 0;
     uint32_t offset = 0;
+    std::array<uint32_t, 16> align;
+    align.fill(1);
     vs.stream_stride.fill(0);
+    auto end = [&](int s, uint32_t at) {
+        uint32_t a = align[size_t(s)];
+        vs.stream_stride[size_t(s)] = std::max(vs.stream_stride[size_t(s)], (at + a - 1) / a * a);
+    };
     for (size_t i = 0; i < vs.decl.size(); i++) {
         uint32_t t = vs.decl[i];
         if (t == 0xFFFFFFFF) break;  // D3DVSD_END
         uint32_t kind = t >> 29;
         if (kind == 1) {  // STREAM
             if (t & (1u << 28)) continue;  // tessellator stream
-            vs.stream_stride[size_t(stream)] = std::max(vs.stream_stride[size_t(stream)], offset);
+            end(stream, offset);
             stream = int(t & 15);
             offset = vs.stream_stride[size_t(stream)];
         } else if (kind == 2) {  // STREAMDATA
@@ -536,8 +552,13 @@ void ParseDeclaration(VertexShader& vs) {
                 offset += (t & (1u << 27)) ? n : n * 4;
             } else {
                 uint32_t reg = t & 15, type = (t >> 16) & 0xFF;
-                if (type != 0x02) vs.inputs[reg] = {stream, offset, type};  // 0x02 D3DVSDT_NONE
-                offset += type == 0x02 ? 0 : TypeSize(type);
+                if (type != 0x02) {  // 0x02 D3DVSDT_NONE
+                    uint32_t a = TypeAlign(type);
+                    offset = (offset + a - 1) / a * a;
+                    align[size_t(stream)] = std::max(align[size_t(stream)], a);
+                    vs.inputs[reg] = {stream, offset, type};
+                    offset += TypeSize(type);
+                }
             }
         } else if (kind == 4) {  // CONSTMEM
             uint32_t count = (t >> 25) & 15, reg = t & 0xFF;
@@ -549,7 +570,7 @@ void ParseDeclaration(VertexShader& vs) {
             }
         }
     }
-    vs.stream_stride[size_t(stream)] = std::max(vs.stream_stride[size_t(stream)], offset);
+    end(stream, offset);
 }
 
 // pixel shader constants

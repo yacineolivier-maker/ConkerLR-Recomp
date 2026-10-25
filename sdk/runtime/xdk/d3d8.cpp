@@ -1004,8 +1004,14 @@ HLE_STDCALL(D3DDevice_CreateVertexShader, 4) {
     vs->handle = rec | 1;
     g_vs[vs->handle] = vs;
     W32(out, vs->handle);
-    LOG_FIRST(64, "d3d: vertex shader %08X, %zu decl tokens, %zu instructions, type %X", vs->handle, vs->decl.size(),
-              vs->program.size() / 4, vs->program_type);
+    std::string tokens;
+    for (uint32_t t : vs->decl) {
+        char h[12];
+        std::snprintf(h, sizeof(h), " %X", t);
+        tokens += h;
+    }
+    LOG_FIRST(64, "d3d: vertex shader %08X, %zu decl tokens, %zu instructions, type %X, declaration%s, stride %u", vs->handle,
+              vs->decl.size(), vs->program.size() / 4, vs->program_type, tokens.c_str(), vs->stream_stride[0]);
     return 0;
 }
 
@@ -1386,6 +1392,15 @@ void EndPrimitive() {
     g_state.vs_handle = handle;
 }
 
+// the same registers at the same offsets with the same types
+bool SameInputs(const gpu::VertexShader& a, const gpu::VertexShader& b) {
+    for (size_t r = 0; r < a.inputs.size(); r++) {
+        const auto &x = a.inputs[r], &y = b.inputs[r];
+        if (!x.type != !y.type || (x.type && (x.offset != y.offset || x.type != y.type))) return false;
+    }
+    return true;
+}
+
 // reads the commands pushed since the last call: vertex data between a begin and an end is drawn, visibility tests
 // are run, the rest is skipped
 std::vector<uint32_t> g_inline;  // inline array dwords between a pushed begin and end
@@ -1427,8 +1442,11 @@ void Walk(uint32_t end) {
                         layout = nullptr;
                     }
                     // both divide it: the bound program's declaration is what the XDK sends with the shader, the formats
-                    // are often a push buffer's left over (the shadow receivers came out with half their triangles)
-                    if (layout && packed && bound_handle & 1 && bound && stride && packed != stride && bytes % stride == 0) {
+                    // are often a push buffer's left over (the shadow receivers came out with half their triangles); of
+                    // the same size too (the iris opening a level: its black, a D3DCOLOR, read as the FLOAT3 a push
+                    // buffer left, came out as a green and blue gradient every other frame)
+                    if (layout && packed && bound_handle & 1 && bound && stride && bytes % stride == 0 &&
+                        (packed != stride || !SameInputs(*layout, *bound))) {
                         LOG_FIRST(20, "d3d: pushed primitive %u: formats of %u bytes and the bound declaration's %u both divide %u, "
                                   "the declaration used", g_im_prim, packed, stride, bytes);
                         layout = nullptr;
