@@ -510,53 +510,41 @@ static uint32_t TypeSize(uint32_t t) {
         case 0: return 4;                // D3DCOLOR
         case 1: case 5: return 2 * count;  // shorts
         case 2: return 4 * count;        // floats
-        case 4: return count;            // bytes
+        case 4: return 4;                // bytes, by four
         case 6: return 4;                // packed 11:11:10
         default: return 4 * count;
     }
 }
 
-// bytes an element's components are aligned on: 4 for floats, colours and packed normals, 2 for shorts, 1 for bytes
-static uint32_t TypeAlign(uint32_t t) {
-    uint32_t kind = t & 15;
-    return kind == 1 || kind == 5 ? 2 : kind == 4 ? 1 : 4;
-}
-
-// the elements of a stream are laid out as the C structure the title writes them from: each on its components' own
-// alignment and the vertex padded to the largest (BrontoCavern's particles, FLOAT3 D3DCOLOR SHORT2 PBYTE2 FLOAT2: the
-// FLOAT2 at 24, 32 bytes a vertex; packed end to end at 22 and 30, the quads after the first stretched across the
-// screen in cyan sheets)
+// packed bytes take a whole dword whatever their count: the hardware fetches them by four (BrontoCavern's particles,
+// FLOAT3 D3DCOLOR SHORT2 PBYTE2 FLOAT2: the FLOAT2 at 24, 32 bytes a vertex; with the PBYTE2 on 2 bytes the quads after
+// the first stretched across the screen in cyan sheets); last in the vertex, only their own bytes count in its size.
+// Nothing else is aligned: Harbour's grass has its D3DCOLOR at 6 after a SHORT3
 void ParseDeclaration(VertexShader& vs) {
     int stream = 0;
-    uint32_t offset = 0;
-    std::array<uint32_t, 16> align;
-    align.fill(1);
+    uint32_t offset = 0, reach = 0;  // where the next element goes, where the last one ends
     vs.stream_stride.fill(0);
-    auto end = [&](int s, uint32_t at) {
-        uint32_t a = align[size_t(s)];
-        vs.stream_stride[size_t(s)] = std::max(vs.stream_stride[size_t(s)], (at + a - 1) / a * a);
-    };
+    auto end = [&](int s, uint32_t at) { vs.stream_stride[size_t(s)] = std::max(vs.stream_stride[size_t(s)], at); };
     for (size_t i = 0; i < vs.decl.size(); i++) {
         uint32_t t = vs.decl[i];
         if (t == 0xFFFFFFFF) break;  // D3DVSD_END
         uint32_t kind = t >> 29;
         if (kind == 1) {  // STREAM
             if (t & (1u << 28)) continue;  // tessellator stream
-            end(stream, offset);
+            end(stream, reach);
             stream = int(t & 15);
-            offset = vs.stream_stride[size_t(stream)];
+            offset = reach = vs.stream_stride[size_t(stream)];
         } else if (kind == 2) {  // STREAMDATA
             if (t & (1u << 28)) {
                 // SKIP counts dwords, SKIPBYTES bytes
                 uint32_t n = (t >> 16) & 0xFF;
                 offset += (t & (1u << 27)) ? n : n * 4;
+                reach = offset;
             } else {
                 uint32_t reg = t & 15, type = (t >> 16) & 0xFF;
                 if (type != 0x02) {  // 0x02 D3DVSDT_NONE
-                    uint32_t a = TypeAlign(type);
-                    offset = (offset + a - 1) / a * a;
-                    align[size_t(stream)] = std::max(align[size_t(stream)], a);
                     vs.inputs[reg] = {stream, offset, type};
+                    reach = offset + ((type & 15) == 4 ? (type >> 4) & 15 : TypeSize(type));
                     offset += TypeSize(type);
                 }
             }
@@ -570,7 +558,7 @@ void ParseDeclaration(VertexShader& vs) {
             }
         }
     }
-    end(stream, offset);
+    end(stream, reach);
 }
 
 // pixel shader constants
