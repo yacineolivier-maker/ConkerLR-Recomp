@@ -1258,11 +1258,23 @@ HLE_STDCALL(D3DDevice_SetPixelShaderConstant, 3) {
 
 // drawing
 
+// XBE_STREAM_LOG=<vertex shader handle, hex>: each draw under it logs stream 0 of the library's table and the arrays the
+// title pushed for registers 0 and 1
+void LogStreams(const char* what, uint32_t from, uint32_t prim, uint32_t count) {
+    static const uint32_t want = std::getenv("XBE_STREAM_LOG") ? uint32_t(std::strtoul(std::getenv("XBE_STREAM_LOG"), nullptr, 16)) : 0;
+    if (!want || g_state.vs_handle != want) return;
+    uint32_t vb = g_state.streams[0].vb;
+    LOG_FIRST(60, "streams: %s(%u, %u) from %08X: stream0 %08X data %08X stride %u | arrays v0 %08X/%08X v1 %08X/%08X", what, prim, count, from, vb,
+              vb ? R32(vb + 4) : 0, g_state.streams[0].stride, g_state.simple[0x1720 >> 2], g_state.simple[0x1760 >> 2],
+              g_state.simple[0x1724 >> 2], g_state.simple[0x1764 >> 2]);
+}
+
 HLE_STDCALL(D3DDevice_DrawVertices, 3) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     Walk(Dev(kDevPush));  // a visibility test begun since the last draw counts this one
     SyncDeferred();
     pb::StreamsFromArrays();
+    LogStreams("DrawVertices", R32(ctx.esp), a[0], a[2]);
     if (g_state.rt.header && Watched(g_state.rt.data))
         LOG_FIRST(10, "watch: DrawVertices(%u, %u, %u) stream0 %08X/%u, library's %08X/%u, from %08X", a[0], a[1], a[2],
                   g_state.streams[0].vb, g_state.streams[0].stride, R32(kStreams + XDK_Stream_Buffer), R32(kStreams + XDK_Stream_Stride), R32(ctx.esp));
@@ -1275,6 +1287,7 @@ HLE_STDCALL(D3DDevice_DrawIndexedVertices, 3) {
     Walk(Dev(kDevPush));
     SyncDeferred();
     pb::StreamsFromArrays();
+    LogStreams("DrawIndexedVertices", R32(ctx.esp), a[0], a[1]);
     const uint8_t* indices = a[2] ? static_cast<const uint8_t*>(HostPtr(a[2])) : nullptr;
     if (g_backend) g_backend->Draw(g_state, a[0], 0, a[1], indices);
     return 0;
@@ -1319,6 +1332,13 @@ void DrawUp(uint32_t prim, uint32_t count, const void* vertices, uint32_t stride
                       stride, need, g_state.vs_handle, g_state.vs->stream_stride[0]);
     }
     SyncDeferred();
+    {
+        static const uint32_t want = std::getenv("XBE_STREAM_LOG") ? uint32_t(std::strtoul(std::getenv("XBE_STREAM_LOG"), nullptr, 16)) : 0;
+        const uint32_t* v = static_cast<const uint32_t*>(vertices);
+        if (want && g_state.vs_handle == want)
+            LOG_FIRST(60, "streams: up(%u, %u) stride %u first %08X %08X %08X %08X %08X %08X %08X %08X", prim, count, stride, v[0], v[1],
+                      v[2], v[3], v[4], v[5], v[6], v[7]);
+    }
     auto stream = g_state.streams[0];
     g_state.streams[0] = {UpVertices(vertices, count * stride), stride};
     g_backend->Draw(g_state, prim, 0, count, nullptr);
@@ -1436,6 +1456,20 @@ void Walk(uint32_t end) {
                     // the pushed formats, unless they do not divide the data and the bound shader's stride does (formats a
                     // push buffer left that the library did not send again)
                     auto layout = pb::InlineLayout(bound_handle & 1 ? bound : nullptr, packed);
+                    {
+                        static const uint32_t want = std::getenv("XBE_STREAM_LOG") ? uint32_t(std::strtoul(std::getenv("XBE_STREAM_LOG"), nullptr, 16)) : 0;
+                        if (want && bound_handle == want)
+                        {
+                            std::string fs;
+                            for (int k = 0; k < 16; k++) {
+                                char h[16];
+                                std::snprintf(h, sizeof(h), " %X", g_state.simple[(0x1760 + k * 4) >> 2]);
+                                fs += h;
+                            }
+                            LOG_FIRST(20, "streams: pushed prim %u, %u bytes, formats%s, packed %u, declaration %u, device vs %08X %08X %08X", g_im_prim, bytes,
+                                      fs.c_str(), packed, stride, Dev(0x794), Dev(0x798), Dev(0x79C));
+                        }
+                    }
                     if (layout && packed && bytes % packed != 0 && stride && bytes % stride == 0) {
                         LOG_FIRST(20, "d3d: pushed primitive %u: formats of %u bytes do not divide %u, bound stride %u used", g_im_prim, packed,
                                   bytes, stride);
