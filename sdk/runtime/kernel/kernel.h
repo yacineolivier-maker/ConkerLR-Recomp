@@ -102,6 +102,8 @@ inline uint32_t CallGuest(X86Context& ctx, uint32_t fn, std::initializer_list<ui
 // objects
 enum class ObjType : uint8_t { Event, Semaphore, Mutant, Timer, Thread, File, SymLink, Device, Queue, Other };
 
+struct Waiter;
+
 struct Object {
     ObjType type;
     uint32_t guest = 0;  // body in guest memory, dispatcher header first for waitables
@@ -111,6 +113,7 @@ struct Object {
     bool notification = false;  // manual reset event or notification timer
     uint32_t owner = 0;         // mutant owner thread
     uint32_t recursion = 0;
+    std::vector<Waiter*> waiters;  // Waits blocked on it
     std::string name;
     explicit Object(ObjType t) : type(t) {}
     virtual ~Object() = default;

@@ -7,10 +7,14 @@
 
 namespace kernel {
 
+struct Waiter {
+    std::condition_variable cv;
+};
+
 namespace {
 
 std::mutex g_dispatch;
-std::condition_variable g_cv;
+std::vector<Waiter*> g_waiters;  // every blocked Wait, for SignalChanged
 
 std::mutex g_handles_lock;
 std::unordered_map<uint32_t, ObjectRef> g_handles;
@@ -31,7 +35,37 @@ std::unordered_map<std::string, std::weak_ptr<Object>> g_names;
 }  // namespace
 
 std::mutex& DispatchLock() { return g_dispatch; }
-void SignalChanged() { g_cv.notify_all(); }
+void SignalChanged() {
+    for (Waiter* w : g_waiters) w->cv.notify_one();
+}
+
+// only the threads blocked on this object; waking every waiter on each signal kept file reader threads busy
+static void Wake(Object& o) {
+    for (Waiter* w : o.waiters) w->cv.notify_one();
+}
+
+// a Wait's place on its objects' waiter lists while it blocks, under the dispatcher lock
+struct Queued {
+    const std::vector<ObjectRef>& objs;
+    Waiter w;
+    bool on = false;
+    void Add() {
+        for (auto& o : objs) {
+            if (o) o->waiters.push_back(&w);
+        }
+        g_waiters.push_back(&w);
+        on = true;
+    }
+    void Remove() {
+        if (!on) return;
+        for (auto& o : objs) {
+            if (o) std::erase(o->waiters, &w);
+        }
+        std::erase(g_waiters, &w);
+        on = false;
+    }
+    ~Queued() { Remove(); }
+};
 
 uint32_t NewHandle(ObjectRef obj) {
     std::lock_guard<std::mutex> lock(g_handles_lock);
@@ -194,6 +228,7 @@ static uint32_t WaitFor(const std::vector<ObjectRef>& objs, bool wait_all, int64
     bool infinite = timeout == INT64_MAX;
     int64_t deadline = infinite ? 0 : ToDeadline(timeout);
     std::unique_lock<std::mutex> lock(g_dispatch);
+    Queued queued{objs};
     for (;;) {
         if (wait_all) {
             bool all = std::all_of(objs.begin(), objs.end(), [&](const ObjectRef& o) { return o && Satisfied(*o, me); });
@@ -215,6 +250,7 @@ static uint32_t WaitFor(const std::vector<ObjectRef>& objs, bool wait_all, int64
                 pending = !self->apcs.empty();
             }
             if (pending) {
+                queued.Remove();
                 lock.unlock();
                 RunApcs(*self);
                 return kUserApc;
@@ -223,10 +259,12 @@ static uint32_t WaitFor(const std::vector<ObjectRef>& objs, bool wait_all, int64
         if (!infinite) {
             int64_t now = duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count();
             if (now >= deadline) return kTimeout;
+            if (!queued.on) queued.Add();
             // bounded so alertable waits notice new APCs
-            g_cv.wait_for(lock, nanoseconds(std::min<int64_t>(deadline - now, 50000000)));
+            queued.w.cv.wait_for(lock, nanoseconds(std::min<int64_t>(deadline - now, 50000000)));
         } else {
-            g_cv.wait_for(lock, milliseconds(50));
+            if (!queued.on) queued.Add();
+            queued.w.cv.wait_for(lock, milliseconds(50));
         }
     }
 }
@@ -242,7 +280,7 @@ int32_t SetEvent(Object& o) {
     std::lock_guard<std::mutex> lock(g_dispatch);
     int32_t old = o.signal;
     SetSignal(o, 1);
-    g_cv.notify_all();
+    Wake(o);
     return old;
 }
 
@@ -258,7 +296,7 @@ int32_t PulseEvent(Object& o) {
     std::lock_guard<std::mutex> lock(g_dispatch);
     int32_t old = o.signal;
     SetSignal(o, 1);
-    g_cv.notify_all();
+    Wake(o);
     return old;
 }
 
@@ -271,7 +309,7 @@ int32_t ReleaseSemaphore(Object& o, int32_t count, uint32_t& status) {
     }
     SetSignal(o, old + count);
     status = kSuccess;
-    g_cv.notify_all();
+    Wake(o);
     return old;
 }
 
@@ -286,7 +324,7 @@ int32_t ReleaseMutant(Object& o, uint32_t& status) {
     if (--o.recursion == 0) {
         o.owner = 0;
         SetSignal(o, 1);
-        g_cv.notify_all();
+        Wake(o);
     }
     status = kSuccess;
     return old;
@@ -369,7 +407,7 @@ static void TimerLoop() {
         {
             std::lock_guard<std::mutex> dl(g_dispatch);
             SetSignal(*e.timer, 1);
-            g_cv.notify_all();
+            Wake(*e.timer);
         }
         if (e.dpc) QueueDpc(e.dpc, uint32_t(Now100ns()), uint32_t(Now100ns() >> 32));
         if (auto t = e.apc_thread.lock(); t && e.apc_routine)

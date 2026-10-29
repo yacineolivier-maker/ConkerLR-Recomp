@@ -234,8 +234,11 @@ void SuspendPoint() {
 }
 
 void QueueApc(Thread& t, uint32_t routine, uint32_t a1, uint32_t a2, uint32_t a3) {
-    std::lock_guard<std::mutex> lock(t.apc_lock);
-    t.apcs.push_back({routine, a1, a2, a3});
+    {
+        std::lock_guard<std::mutex> lock(t.apc_lock);
+        t.apcs.push_back({routine, a1, a2, a3});
+    }
+    std::lock_guard<std::mutex> lock(DispatchLock());
     SignalChanged();
 }
 

@@ -3,3 +3,5 @@
 # etages fixes sans texture, file audio, mix bins, audio stereo ; la DLL du code de jeu n'est pas reprise
 # repris depuis TGP482/XboxXBERecomp jusqu'a 9a99697 (2026-10-23) : XDK 4831, cadence calee sur l'ecran (fps_cap = 1),
 # GetRasterStatus, BlockOnNonSurfaceResource, rampe gamma, Reset qui garde les tampons ; RunPushBuffer amont non repris (le notre est plus complet)
+# repris depuis TGP482/XboxXBERecomp le 2026-10-29 : 7beac8c (test alpha seulement s'il est actif), 3a084a5 (attentes noyau : seuls les fils bloques sur l'objet sont reveilles)
+# en attente (d3d12.cpp diverge, reprise a la main) : 12d1351 points sprites, 4a4d0f0 profondeur flottante, 8cad774 erreur D3D12, 91146ff/5973b20 cadence, 16bf1cd/908dc53/62a53d5/0fd0044 performances, 8ce4dcd extraction/remplacement de textures

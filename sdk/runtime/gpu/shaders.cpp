@@ -633,6 +633,7 @@ PixelKey MakePixelKey(const State& s, const TexInfo tex[4]) {
     }
     k.flat = s.simple[kMShadeMode >> 2] == 0x1D00;  // D3DSHADE_FLAT
     k.two_sided = s.rs[kRsTwoSidedLighting] != 0;
+    k.alphatest = s.simple[kMAlphaTestEnable >> 2] != 0;
     if (s.ps) {
         const uint32_t* d = s.ps->def;
         k.programmable = 1;
@@ -945,7 +946,8 @@ std::string PixelHlsl(const PixelKey& k) {
         body += "cur.rgb = saturate(cur.rgb + v1.rgb);\n";
         body += "float4 outc = float4(lerp(fogin.rgb, cur.rgb, fogin.a), cur.a);\n";
     }
-    body += "alphatest(outc.a);\n" + Hooks().Output() + "return outc;\n}\n";
+    if (k.alphatest) body += "alphatest(outc.a);\n";
+    body += Hooks().Output() + "return outc;\n}\n";
     s += body;
     return k.quad ? QuadHlsl(std::move(s)) : s;
 }

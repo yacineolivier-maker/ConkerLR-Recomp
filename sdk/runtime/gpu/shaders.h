@@ -33,6 +33,7 @@ struct PixelKey {
     uint32_t flat = 0, two_sided = 0;
     uint32_t proj = 0;       // fixed function: bit per stage sampled at coordinates divided by w
     uint32_t quad = 0;       // a screen quad: QuadHlsl
+    uint32_t alphatest = 0;  // alpha test on: only then may the shader discard, which turns off early depth tests
     bool operator==(const PixelKey& o) const;
 };
 
