@@ -78,7 +78,7 @@ void Init() {
     }
 }
 
-Pad Poll(int port) {
+Pad Read(int port) {
     Pad p;
     {
         std::lock_guard lock(g_lock);
@@ -107,7 +107,18 @@ Pad Poll(int port) {
             p.ry = int16_t(-1 - axis(SDL_GAMEPAD_AXIS_RIGHTY));
         }
     }
+    return p;
+}
+
+Pad Poll(int port) {
+    Pad p = Read(port);
     if (app::kGame.pad) app::kGame.pad(port, p);
+    // what answered the quit question is not the game's
+    if (app::PauseHoldsPad(port, p)) {
+        bool connected = p.connected;
+        p = Pad{};
+        p.connected = connected;
+    }
     return p;
 }
 

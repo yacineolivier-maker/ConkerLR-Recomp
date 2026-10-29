@@ -151,6 +151,8 @@ void ApplyNow() {
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    // Escape and the quit question come before everything, a game's own use of Escape included
+    if (intptr_t result = 0; PauseMessage(hwnd, msg, wp, lp, &result)) return result;
     {
         std::lock_guard lock(UiLock());
         if (ImGui::GetCurrentContext() && ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp)) return 1;
@@ -223,6 +225,13 @@ void* Window() { return g_hwnd; }
 std::recursive_mutex& UiLock() {
     static std::recursive_mutex m;
     return m;
+}
+
+void Quit() {
+    if (g_mode_changed) ChangeDisplaySettingsW(nullptr, 0);
+    ClipCursor(nullptr);
+    logx::Flush();
+    kernel::Shutdown(0);
 }
 
 void ApplyDisplay() { PostMessageW(g_hwnd, kApplyDisplay, 0, 0); }

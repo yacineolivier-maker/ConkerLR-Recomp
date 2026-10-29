@@ -46,7 +46,18 @@ void StartOutput(std::function<void(float*, uint32_t)> render) {
         constexpr uint32_t kSlots = kMaxQueued + 1;
         std::vector<float> bufs(kSlots * kFrames * 2);
         uint32_t depth = kMinQueued;
+        bool stopped = false;
         for (uint32_t n = 0;;) {
+            // paused: the voice stops where it is, nothing more is mixed until the game is back
+            if (app::Paused() != stopped) {
+                stopped = !stopped;
+                if (stopped) voice->Stop();
+                else voice->Start();
+            }
+            if (stopped) {
+                Sleep(5);
+                continue;
+            }
             XAUDIO2_VOICE_STATE st;
             voice->GetState(&st, XAUDIO2_VOICE_NOSAMPLESPLAYED);
             // a starved voice crackles: queue one buffer more each time, up to kMaxQueued

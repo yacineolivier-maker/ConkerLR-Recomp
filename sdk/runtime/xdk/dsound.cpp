@@ -9,6 +9,7 @@
 #include <optional>
 #include <vector>
 
+#include "app/app.h"
 #include "audio/audio.h"
 #include "xbe/xbe.h"
 #include "xdk/hle.h"
@@ -600,10 +601,7 @@ std::optional<Cursor> BufferFrame(Voice& v) {
     return at;
 }
 
-int64_t NowMs() {
-    using namespace std::chrono;
-    return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
-}
+int64_t NowMs() { return app::GameNs() / 1000000; }  // stands still while the game is paused
 
 // adds the voice to the bins, frames of kBins interleaved, its levels ramped across the block
 void MixVoice(Voice& v, float* bins, uint32_t frames) {
@@ -706,6 +704,7 @@ void Start() {
                 done.assign(g_done.begin(), g_done.end());
                 g_done.clear();
             }
+            app::PausePoint();
             Run(ctx, done);
         }
     });

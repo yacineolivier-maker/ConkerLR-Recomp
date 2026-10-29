@@ -14,6 +14,7 @@ struct Pad {
 void Init();  // window thread, before boot
 // the controller on that port, then GameInfo::pad
 Pad Poll(int port);
+Pad Read(int port);  // the controller alone, without GameInfo::pad
 void Rumble(int port, uint16_t left, uint16_t right);
 
 }  // namespace input

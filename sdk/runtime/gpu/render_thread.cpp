@@ -44,7 +44,7 @@ constexpr uint32_t kHeaderRing = 8u << 20;
 
 enum class WaitFor : uint8_t { ReadBack, Resource, Fence, Flush, Copy, Frame, Count };
 
-enum class Op : uint8_t { State, Draw, Clear, Copy, Present, Sync, RecordLate, Flush, Gamma, ClearReport, GetReport };
+enum class Op : uint8_t { State, Draw, Clear, Copy, Present, Redisplay, Sync, RecordLate, Flush, Gamma, ClearReport, GetReport };
 
 struct Cmd {
     Op op;
@@ -191,6 +191,12 @@ public:
         // the title records one frame while the one before it draws
         Wait(last_present_, WaitFor::Frame, nullptr);
         last_present_ = id;
+    }
+
+    // from the window thread, the device lock held and the title stopped
+    void Redisplay() override {
+        cur_->cmds.push_back(Cmd{Op::Redisplay});
+        Wait(Submit(), WaitFor::Frame, nullptr);
     }
 
     void Sync(uint32_t data, uint32_t) override { ReadBack(data, false); }
@@ -477,6 +483,7 @@ private:
             case Op::Clear: inner_->Clear(state_, c.a, c.size ? data : nullptr, c.b, c.c, c.f, c.d); break;
             case Op::Copy: inner_->Copy(c.s1, c.s2, c.a, c.b, c.c); break;
             case Op::Present: inner_->Present(c.s1); break;
+            case Op::Redisplay: inner_->Redisplay(); break;
             case Op::Sync: inner_->Sync(c.a, 0); break;
             case Op::RecordLate: inner_->RecordLate(c.a); break;
             case Op::Flush: inner_->Flush(); break;

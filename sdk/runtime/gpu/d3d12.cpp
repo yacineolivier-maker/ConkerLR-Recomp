@@ -443,6 +443,7 @@ public:
     void Draw(const State& s, uint32_t prim, uint32_t start, uint32_t count, const uint8_t* indices) override;
     void Copy(const Surface& src, const Surface& dst, uint32_t count, uint32_t src_rects, uint32_t dst_points) override;
     void Present(const Surface& front) override;
+    void Redisplay() override;
     void Sync(uint32_t data, uint32_t size) override;
     void SyncLate(uint32_t data) override;
     bool DeliverLate(uint32_t data) override;
@@ -683,6 +684,7 @@ private:
     uint64_t fence_value_ = 0;
     Frame frames_[kFrames];
     uint64_t frame_ = 0;
+    Surface shown_{};  // the front buffer last presented, for Redisplay
     ComPtr<ID3D12GraphicsCommandList> cl_;
     ComPtr<ID3D12DescriptorHeap> srv_heap_;
     ComPtr<ID3D12DescriptorHeap> smp_heap_;
@@ -3367,6 +3369,7 @@ void D3D12Backend::RenderUi() {
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
     if (app::kGame.ui) app::kGame.ui(fps_);
+    app::PauseUi();
     ImGui::Render();
     ID3D12DescriptorHeap* uh[] = {ui_heap_.Get()};
     cl_->SetDescriptorHeaps(1, uh);
@@ -3468,6 +3471,7 @@ void LogPerf() {
 
 void D3D12Backend::Present(const Surface& front) {
     PerfScope perf_present{g_perf.present};
+    shown_ = front;
     if (cap_) FinishCapture(front);
     // a capture asked meanwhile takes the next frame: consecutive frames for what flickers
     if (!cap_ && g_capture.exchange(false) && CaptureOn()) StartCapture();
@@ -3515,6 +3519,23 @@ void D3D12Backend::Present(const Surface& front) {
     CountFps();
     if (diag::Perf()) LogPerf();
     ApplySettings();
+}
+
+// the frame as last shown, the modern effects already in its target: no new frame, no texture sweep
+void D3D12Backend::Redisplay() {
+    ResizeSwap();
+    Target* t = FindTarget(shown_, false);
+    if (ramp_dirty_) UploadGammaRamp();
+    Transition(lut_.Get(), lut_state_, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    DrawFrame(t, swap_->GetCurrentBackBufferIndex());
+    Submit(false);
+    if (app::Get().vsync) {
+        WaitVBlank();
+        swap_->Present(0, 0);
+    } else {
+        swap_->Present(0, tearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0);
+    }
+    ResetFrame();
 }
 
 void D3D12Backend::ApplySettings() {

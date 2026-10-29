@@ -39,6 +39,8 @@ Detailed progress notes: [docs/TECHNICAL_NOTES.md](docs/TECHNICAL_NOTES.md).
 - The console's audio DSP effects (I3DL2 reverb, filters) reproduced.
 - In-game options overlay on **F1** (mouse), saved to `settings.toml`. F7 / F8 / F9 toggle SMAA, ambient
   occlusion and soft shadows for comparison.
+- **Escape** pauses the game (picture, sound and game time) and asks before closing it: yes (O, A on the
+  controller) closes it at once, no (N, B, or Escape again) goes back to the game where it was.
 
 ## Supported version
 
@@ -97,13 +99,13 @@ the F1 panel is closed, the mouse is captured and hidden.
 | Left trigger | Left Ctrl, C | crouch, skip cutscenes |
 | Right trigger | middle click, A (Q in QWERTY) | |
 | White / Black | 1 / 2 | |
-| Start / Back | Esc / Backspace | pause |
+| Start / Back | P / Backspace | pause |
 | D-pad | arrow keys | menus |
 | Stick clicks | V / mouse button 4 | |
 
 Turn it off, set the mouse sensitivity or invert it in F1. Keys are remapped in the `[clavier_souris]` table of
 `settings.toml`, written by F1 > Enregistrer. Each action takes a list of key names: a character as printed on the
-keyboard, or `Espace`, `Entrée`, `Échap`, `Tab`, `Maj`, `Ctrl`, `Alt`, `Retour arrière`, `Flèche haut` (`bas`,
+keyboard, or `Espace`, `Entrée`, `Tab`, `Maj`, `Ctrl`, `Alt`, `Retour arrière`, `Flèche haut` (`bas`,
 `gauche`, `droite`), `Clic gauche` (`droit`, `milieu`), `Souris 4`, `Souris 5`, `F2` to `F12`.
 
 ## Contributing
@@ -147,12 +149,13 @@ dédoublé : c'est l'effet de gueule de bois prévu par le jeu.
 dossiers `dvddata` et `media` dans `assets`, lancer `build.bat`. La première compilation est longue.
 
 **Jouer** : un dossier `assets` à côté de `Conker.exe` avec votre image disque (`.iso`) ou les fichiers
-extraits. Réglages dans `settings.toml` (tableau ci-dessus) ou en jeu avec **F1**.
+extraits. Réglages dans `settings.toml` (tableau ci-dessus) ou en jeu avec **F1**. **Échap** met le jeu en
+pause et demande avant de le fermer : Oui (O, A de la manette) ferme tout de suite, Non (N, B ou Échap) reprend.
 
 **Clavier et souris** (dépannage, en plus de la manette 1) : ZQSD pour se déplacer (Maj pour marcher), souris
 pour la caméra, Espace = A (sauter), clic gauche ou E = B (action, attaque), clic droit ou R = X, F = Y,
 Ctrl gauche ou C = gâchette gauche (s'accroupir, passer les cinématiques), clic milieu ou A = gâchette droite,
-1 / 2 = Blanc / Noir, Échap = Start, Retour arrière = Back, flèches = croix. Réglages dans F1 ; touches
+1 / 2 = Blanc / Noir, P = Start, Retour arrière = Back, flèches = croix. Réglages dans F1 ; touches
 modifiables dans la table `[clavier_souris]` de `settings.toml`.
 
 Licence MIT. Conker: Live & Reloaded © Microsoft / Rare ; projet sans lien avec Microsoft, Rare ou Xbox.

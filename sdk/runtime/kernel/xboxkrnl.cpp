@@ -67,10 +67,10 @@ void PutSystemTime(uint32_t va, uint64_t t) {
     W32(va + 4, uint32_t(t >> 32));
 }
 
+// the guest's clocks run on app::GameNs: they stand still while the game is paused
 uint64_t InterruptTime() {
-    using namespace std::chrono;
-    static const auto start = steady_clock::now();
-    return uint64_t(duration_cast<nanoseconds>(steady_clock::now() - start).count() / 100);
+    static const int64_t start = app::GameNs();
+    return uint64_t((app::GameNs() - start) / 100);
 }
 
 }  // namespace
@@ -104,10 +104,9 @@ void InitKernelData() {
     W32(DataAddress(157), 10000);  // 1 ms in 100 ns units
     // the start of the clock
     std::thread([] {
-        auto start = std::chrono::steady_clock::now();
+        int64_t start = app::GameNs();
         for (;;) {
-            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
-            W32(g_tick_count_va, uint32_t(ms));
+            W32(g_tick_count_va, uint32_t((app::GameNs() - start) / 1000000));
             PutSystemTime(DataAddress(120), InterruptTime());
             PutSystemTime(DataAddress(154), uint64_t(Now100ns()));
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -236,9 +235,8 @@ KERNEL_EXPORT(228, NtSetSystemTime, 2) {
 constexpr uint64_t kPerfFrequency = 3375000;
 
 KERNEL_EXPORT(126, KeQueryPerformanceCounter, 0) {
-    using namespace std::chrono;
-    static const auto start = steady_clock::now();
-    uint64_t ns = uint64_t(duration_cast<nanoseconds>(steady_clock::now() - start).count());
+    static const int64_t start = app::GameNs();
+    uint64_t ns = uint64_t(app::GameNs() - start);
     uint64_t v = ns / 1000000000ull * kPerfFrequency + ns % 1000000000ull * kPerfFrequency / 1000000000ull;
     ctx.edx = uint32_t(v >> 32);
     return uint32_t(v);

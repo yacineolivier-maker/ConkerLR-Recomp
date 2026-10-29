@@ -3,7 +3,8 @@
 // Touches réassignables dans settings.toml, table [clavier_souris] ; noms : un caractère tel qu'écrit sur le
 // clavier, ou Espace, Entrée, Échap, Tab, Maj, Ctrl, Alt, Retour arrière, Flèche haut/bas/gauche/droite, F1 à F12,
 // Clic gauche/droit/milieu, Souris 4, Souris 5. Le clavier n'est lu que fenêtre au premier plan, panneau F1 fermé ;
-// la souris y est alors captive et invisible.
+// la souris y est alors captive et invisible. Échap est réservé à la question de fermeture du portage (app/pause.cpp) :
+// il n'est plus Start (P par défaut) et une table qui le donne encore à une commande le perd.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
@@ -64,7 +65,7 @@ std::vector<Commande>& Commandes() {
         {"blanc", {0x02}},                       // 1
         {"gachette_gauche", {0x1D, 0x2E}},       // Ctrl gauche, C : s'accroupir, passer les cinématiques
         {"gachette_droite", {Souris(VK_MBUTTON), 0x10}},  // A
-        {"start", {0x01}},                       // Échap
+        {"start", {0x19}},                       // P (Échap : question de fermeture)
         {"back", {0x0E}},                        // Retour arrière
         {"croix_haut", {0xE048}},
         {"croix_bas", {0xE050}},
@@ -129,6 +130,10 @@ void Retenir(Commande& c, std::vector<std::string> noms) {
             LOGW("clavier : touche « %s » inconnue pour %s", n.c_str(), c.cle);
             continue;
         }
+        if (vk == VK_ESCAPE) {
+            LOGW("clavier : Échap ferme le jeu, retiré de %s", c.cle);
+            continue;
+        }
         c.noms.push_back(n);
         c.vk.push_back(vk);
     }
@@ -182,10 +187,15 @@ void ClavierCharger(const void* table) {
         for (Commande& c : Commandes())
             if (const toml::array* a = (*cs)[c.cle].as_array()) {
                 std::vector<std::string> noms;
+                bool echap = false;
                 for (auto& e : *a)
-                    if (auto s = e.value<std::string>()) noms.push_back(*s);
+                    if (auto s = e.value<std::string>()) {
+                        noms.push_back(*s);
+                        echap |= Touche(*s) == VK_ESCAPE;
+                    }
                 Retenir(c, noms);
-                if (c.vk.empty()) c.noms = {""};  // vide voulu : pas de touche, pas de défaut
+                // vide voulu : pas de touche, pas de défaut ; vidé parce qu'il ne restait qu'Échap : le défaut
+                if (c.vk.empty() && !echap) c.noms = {""};
             }
     }
     Defauts();

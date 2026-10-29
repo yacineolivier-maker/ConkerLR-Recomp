@@ -69,6 +69,18 @@ void FinishHandover();  // any thread but the window thread's: opens the game wi
 // held around ImGui: the window thread's messages and the renderer's frame
 std::recursive_mutex& UiLock();
 
+// Escape pauses the game under a quit question (pause.cpp): the guest's threads stop at their next kernel wait or
+// swap, its clocks and its sound stand still, the last frame stays up with the question over it
+bool Paused();
+void PausePoint();  // a guest thread waits here while the game is paused
+int64_t GameNs();   // the steady clock in nanoseconds less the time spent paused, for the guest's clocks
+// window thread, before ImGui and the game: true returns result instead
+bool PauseMessage(void* hwnd, uint32_t msg, uintptr_t wp, intptr_t lp, intptr_t* result);
+void PauseUi();  // inside the ImGui frame, UiLock held
+// after a pause a pad reads idle until what answered the question is let go: true holds this read
+bool PauseHoldsPad(int port, const input::Pad& pad);
+[[noreturn]] void Quit();  // window thread: the process ends at once, the display mode given back
+
 // what the game repo defines once
 struct Option {  // a setting in the settings file, flag or value
     const char* key;

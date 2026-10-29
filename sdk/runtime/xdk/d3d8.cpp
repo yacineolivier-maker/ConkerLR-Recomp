@@ -355,6 +355,7 @@ void VerticalBlank(X86Context& ctx) {
     for (;;) {
         next = std::max(next + std::chrono::microseconds(16667), clock::now());
         std::this_thread::sleep_until(next);
+        app::PausePoint();  // no blanks counted while the game is paused
         uint32_t count = Dev(XDK_CDevice_VBlankCount) + 1, swaps = Dev(kDevSwapCount);
         SetDev(XDK_CDevice_VBlankCount, count);
         ObjectRef event = FromPointer(kDevice + XDK_CDevice_VBlankEvent);
@@ -377,6 +378,12 @@ void VerticalBlank(X86Context& ctx) {
 
 gpu::State& State() { return g_state; }
 std::recursive_mutex& Lock() { return g_lock; }
+
+void Redisplay() {
+    // the title stopped in the middle of a call keeps the device: this tick passes
+    std::unique_lock<std::recursive_mutex> lock(g_lock, std::try_to_lock);
+    if (lock.owns_lock() && g_backend) g_backend->Redisplay();
+}
 
 }  // namespace d3d
 
@@ -614,6 +621,7 @@ HLE_STDCALL(D3DDevice_SetGammaRamp, 2) {
     if (XDK_CDevice_GammaRamps != xdk::kUnknown)
         for (uint32_t slot = 0; slot < 2; slot++)
             std::memcpy(HostPtr(kDevice + XDK_CDevice_GammaRamps + slot * sizeof(ramp)), ramp, sizeof(ramp));
+    std::lock_guard<std::recursive_mutex> lock(g_lock);  // Redisplay may use the backend from the window thread
     if (g_backend) g_backend->SetGamma(ramp);
     return 0;
 }
@@ -668,6 +676,7 @@ std::atomic<uint32_t> g_presents{0};
 }  // namespace
 
 HLE_STDCALL(D3DDevice_Swap, 1) {
+    app::PausePoint();  // a title that never waits in the kernel stops here
     app::SplashFirstFrame();
     // handed over from the previous instance: the window opens on the second frame, the first picture with
     // anything drawn over it right after

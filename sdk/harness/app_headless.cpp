@@ -49,4 +49,13 @@ std::recursive_mutex& UiLock() {
 
 void Pace() {}
 
+// no window, no Escape: never paused
+bool Paused() { return false; }
+void PausePoint() {}
+int64_t GameNs() {
+    using namespace std::chrono;
+    return duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count();
+}
+bool PauseHoldsPad(int, const input::Pad&) { return false; }
+
 }  // namespace app
