@@ -16,7 +16,7 @@ extern uint32_t g_occlusion_rayon, g_occlusion_force, g_nettete, g_ombres_taille
 extern bool g_clavier_souris, g_souris_inverser_y;
 extern uint32_t g_souris_sensibilite;
 // src/game/cdetv_*.cpp (correctifs repris de cdetv, MIT)
-extern bool g_cadence_60, g_vitesse_juste;
+extern bool g_cadence_60, g_vitesse_juste, g_distance_loin;
 
 namespace {
 
@@ -95,6 +95,7 @@ void OptionsUi(double fps) {
     // le pas du jeu suit les vblanks : au-delà de 60 images/s, il irait trop vite
     if (g_cadence_60 && (s.fps_cap == 0 || s.fps_cap > 60)) ImGui::TextDisabled("Limite au-dessus de 60 : le jeu irait trop vite");
     ImGui::Checkbox("Vitesse juste en cas de ralentissement", &g_vitesse_juste);
+    ImGui::Checkbox("Herbe, personnages et fourrure sans disparition au loin", &g_distance_loin);
     ImGui::Separator();
 
     ImGui::TextUnformatted("Commandes");

@@ -351,3 +351,24 @@ call = "CadenceReset"
 [[hook]]
 at = 0x2A7B60
 call = "CadenceImage"
+
+# disparitions au loin (cdetv_distance.cpp) ; personnages 0x80DA0 et fourrure 0x3E1EE0 remplacés dans le même fichier
+[[hook]]
+at = 0x1A9540
+call = "DistanceHerbe"
+
+[[hook]]
+at = 0x1A969F
+call = "DistanceHerbeCentre"
+
+[[hook]]
+at = 0x1A952C
+call = "DistanceHerbePoussee"
+
+[[hook]]
+at = 0x1A993D
+call = "DistanceHerbeBrume"
+
+[[hook]]
+at = 0x1A9A37
+call = "DistanceHerbeDessin"
