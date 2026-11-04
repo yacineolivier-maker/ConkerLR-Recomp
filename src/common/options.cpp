@@ -15,6 +15,8 @@ extern uint32_t g_occlusion_rayon, g_occlusion_force, g_nettete, g_ombres_taille
 // clavier_souris.cpp
 extern bool g_clavier_souris, g_souris_inverser_y;
 extern uint32_t g_souris_sensibilite;
+// src/game/cdetv_*.cpp (correctifs repris de cdetv, MIT)
+extern bool g_cadence_60, g_vitesse_juste;
 
 namespace {
 
@@ -86,6 +88,13 @@ void OptionsUi(double fps) {
     static const uint32_t kCaps[] = {30, 60, 120, 144, app::kFpsCapRefresh, 0};
     static const char* const kCapNames[] = {"30", "60", "120", "144", "Écran", "Sans limite"};  // Écran : juste sous sa fréquence
     Choice("Images par seconde au plus", s.fps_cap, kCaps, kCapNames, int(std::size(kCaps)));
+    ImGui::Separator();
+
+    ImGui::TextUnformatted("Améliorations (reprises de Conker: Live & Recompiled)");
+    ImGui::Checkbox("60 images par seconde", &g_cadence_60);
+    // le pas du jeu suit les vblanks : au-delà de 60 images/s, il irait trop vite
+    if (g_cadence_60 && (s.fps_cap == 0 || s.fps_cap > 60)) ImGui::TextDisabled("Limite au-dessus de 60 : le jeu irait trop vite");
+    ImGui::Checkbox("Vitesse juste en cas de ralentissement", &g_vitesse_juste);
     ImGui::Separator();
 
     ImGui::TextUnformatted("Commandes");

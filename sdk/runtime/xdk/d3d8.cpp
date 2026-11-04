@@ -378,6 +378,7 @@ void VerticalBlank(X86Context& ctx) {
 
 gpu::State& State() { return g_state; }
 std::recursive_mutex& Lock() { return g_lock; }
+void SetPresentInterval(uint32_t interval) { SetInterval(interval); }
 
 void Redisplay() {
     // the title stopped in the middle of a call keeps the device: this tick passes
