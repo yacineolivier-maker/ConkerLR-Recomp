@@ -372,3 +372,12 @@ call = "DistanceHerbeBrume"
 [[hook]]
 at = 0x1A9A37
 call = "DistanceHerbeDessin"
+
+# sons coupés après une pause (cdetv_sons_pause.cpp)
+[[hook]]
+at = 0x30730
+call = "SonsPauseBoucle"
+
+[[hook]]
+at = 0x30BC0
+call = "SonsPauseMinute"
