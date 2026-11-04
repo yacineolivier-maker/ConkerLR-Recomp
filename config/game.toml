@@ -386,3 +386,9 @@ call = "SonsPauseMinute"
 [[hook]]
 at = 0x808F0
 call = "BerriSol"
+
+# flou des cinématiques (cdetv_cinematiques.cpp)
+[[hook]]
+at = 0x1C71A0
+call = "FlouCinematique"
+on_true = "ret"

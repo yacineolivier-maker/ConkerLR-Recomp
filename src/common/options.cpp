@@ -17,6 +17,7 @@ extern bool g_clavier_souris, g_souris_inverser_y;
 extern uint32_t g_souris_sensibilite;
 // src/game/cdetv_*.cpp (correctifs repris de cdetv, MIT)
 extern bool g_cadence_60, g_vitesse_juste, g_distance_loin, g_sons_pause, g_berri_sol;
+extern uint32_t g_flou_cine;
 
 namespace {
 
@@ -98,6 +99,9 @@ void OptionsUi(double fps) {
     ImGui::Checkbox("Herbe, personnages et fourrure sans disparition au loin", &g_distance_loin);
     ImGui::Checkbox("Sons longs gardés après une pause", &g_sons_pause);
     ImGui::Checkbox("Berri couchée sur le sol (arène finale)", &g_berri_sol);
+    static const uint32_t kFlou[] = {0, 1};
+    static const char* const kFlouNames[] = {"Sans", "Celui du jeu"};
+    Choice("Flou des cinématiques", g_flou_cine, kFlou, kFlouNames, int(std::size(kFlou)));
     ImGui::Separator();
 
     ImGui::TextUnformatted("Commandes");

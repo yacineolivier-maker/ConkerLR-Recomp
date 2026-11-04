@@ -26,6 +26,7 @@ void InstantanesUi();
 void EtiquetteNiveau();  // src/game/diag_hooks.cpp
 // src/game/cdetv_*.cpp (correctifs repris de cdetv, MIT)
 extern bool g_cadence_60, g_vitesse_juste, g_distance_loin, g_sons_pause, g_berri_sol;
+extern uint32_t g_flou_cine;
 
 void Pad(int port, input::Pad& pad) {
     AutoPad(port, pad);
@@ -75,7 +76,8 @@ const app::GameInfo app::kGame = {
                 {"vitesse_juste", &game::g_vitesse_juste, nullptr},
                 {"distance_loin", &game::g_distance_loin, nullptr},
                 {"sons_pause", &game::g_sons_pause, nullptr},
-                {"berri_sol", &game::g_berri_sol, nullptr}},
+                {"berri_sol", &game::g_berri_sol, nullptr},
+                {"flou_cinematiques", nullptr, &game::g_flou_cine}},
     .load = game::ClavierCharger,
     .save = game::ClavierEnregistrer,
     .init = game::Init,
