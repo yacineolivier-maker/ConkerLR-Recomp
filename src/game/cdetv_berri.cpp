@@ -32,7 +32,7 @@ void BerriSol(X86Context& ctx, uint8_t* base) {
     uint32_t nom = kernel::R32(table + anim * 12);
     if (!Ok(nom)) return;
     std::string s = kernel::ReadCString(nom, 96);
-    if (s.find("berimatrix\deadpose") == std::string::npos) return;
+    if (s.find("berimatrix\\deadpose") == std::string::npos) return;
     kernel::W32(c + 0x1C0, 0);  // la cinématique le remet à chaque image
     static int n = 0;
     if (n++ % 300 == 0) LOGI("berri: « %s » basculée de -90 : dessinée à plat", s.c_str());
