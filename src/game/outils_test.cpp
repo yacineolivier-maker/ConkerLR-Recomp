@@ -91,6 +91,7 @@ uint32_t Conker() {
 
 float g_memo[3];
 bool g_memo_ok = false;
+bool g_releve = false;  // action « releve » : relevé tout de suite, nouvelle fenêtre de mesure
 
 void Position(const char* quoi) {
     uint32_t c = Conker();
@@ -176,6 +177,10 @@ void Action(const std::string& a) {
     if (nom == "position") return Position("position");
     if (nom == "repere") return Journal("repère : %s", val.c_str());
     if (nom == "niveau") return ChangerNiveau(val);
+    if (nom == "releve") {
+        g_releve = true;
+        return Journal("relevé demandé%s%s", val.empty() ? "" : " : ", val.c_str());
+    }
     if (nom == "teleporter") {
         if (val.empty()) return Teleporter(nullptr);
         float p[3] = {};
@@ -218,6 +223,47 @@ struct Mesure {
     double pas = 0;
 } g_mesure;
 
+// Berri (modèle 0x97) en service : son indice et le nom de son animation, sinon -1
+int Berri(std::string* anim) {
+    uint32_t persos = kernel::R32(0x84A5F8);
+    if (!Ok(persos, 0x81 * 0x6D0)) return -1;
+    for (uint32_t i = 0; i < 0x81; i++) {
+        uint32_t c = persos + i * 0x6D0;
+        if (!kernel::R32(c + 0x64) || kernel::R32(c + 0x68) != 0x97) continue;
+        uint32_t a = kernel::R32(c + 0xA4), m = kernel::R32(c + 0x74);
+        if (anim && a < 0x100 && Ok(m + 0x50, 4)) {
+            uint32_t table = kernel::R32(m + 0x50);
+            if (Ok(table + a * 12, 4) && Ok(kernel::R32(table + a * 12), 1))
+                *anim = kernel::ReadCString(kernel::R32(table + a * 12), 96);
+        }
+        return int(i);
+    }
+    return -1;
+}
+
+
+// relevé de la fenêtre de mesure (toutes les 10 s, ou à la demande)
+void Releve(double t) {
+    double duree = t - g_mesure.debut;
+    if (duree > 0.2 && g_mesure.images)
+        Journal("cadence : %.1f images/s, pas moyen %.3f, %u vblanks manqués, temps du jeu par seconde %.2f "
+                "(sur %.1f s)", g_mesure.images / duree, g_mesure.pas / g_mesure.images, g_mesure.manques,
+                g_mesure.pas / 30.0 / duree, duree);
+    static uint32_t sons = 0, appels = 0, flou = 0, berri = 0;
+    Journal("correctifs : %u échéances de sons gelées en pause (%u mises à jour d'émetteurs pendant la pause), "
+            "%u flous de cinématique sautés, %u images de Berri à plat", g_compte_sons - sons,
+            g_appels_sons_pause - appels, g_compte_flou - flou, g_compte_berri - berri);
+    sons = g_compte_sons;
+    appels = g_appels_sons_pause;
+    flou = g_compte_flou;
+    berri = g_compte_berri;
+    std::string anim;
+    if (int b = Berri(&anim); b >= 0) Journal("Berri présente (personnage %d), animation « %s »", b, anim.c_str());
+    Position("position");
+    g_mesure = Mesure{};
+    g_mesure.debut = t;
+}
+
 void Raccourci(uint32_t vk) {
     switch (vk) {
     case '1': Regler("cadence_60", !g_cadence_60); break;
@@ -256,7 +302,7 @@ void ImageOutils() {
     if (!g_journal_actif) return;
 
     static uint32_t niveau = ~0u, intervalle = ~0u;
-    static int pause = -1;
+    static int pause = -1, camera = -1;
     if (uint32_t n = kernel::R32(0x7FA1F8); n != niveau) {
         niveau = n;
         Journal("niveau %u : %s", n, NomNiveau(n).c_str());
@@ -269,27 +315,18 @@ void ImageOutils() {
         intervalle = i;
         Journal("intervalle de présentation %u", i);
     }
+    if (int c = cdetv::R8(0x76F0E0); c != camera) {
+        camera = c;
+        Journal("caméra de cinématique %s ([0x76F0E0] = %d)", c == 1 ? "active" : "inactive", c);
+    }
     // l'image précédente : son pas et ses vblanks manqués
     if (g_mesure.debut < 0) g_mesure.debut = t;
     g_mesure.images++;
     g_mesure.pas += RF(0x7FA24C);
     g_mesure.manques += kernel::R32(0x7F9F30);
-    if (t - g_mesure.debut >= 10) {
-        double duree = t - g_mesure.debut;
-        Journal("cadence : %.1f images/s, pas moyen %.3f, %u vblanks manqués, temps du jeu par seconde %.2f",
-                g_mesure.images / duree, g_mesure.pas / g_mesure.images, g_mesure.manques,
-                g_mesure.pas / 30.0 / duree);
-        static uint32_t sons = 0, appels = 0, flou = 0, berri = 0;
-        Journal("correctifs : %u échéances de sons gelées en pause (%u mises à jour d'émetteurs pendant la pause), "
-                "%u flous de cinématique sautés, %u images de Berri à plat", g_compte_sons - sons,
-                g_appels_sons_pause - appels, g_compte_flou - flou, g_compte_berri - berri);
-        sons = g_compte_sons;
-        appels = g_appels_sons_pause;
-        flou = g_compte_flou;
-        berri = g_compte_berri;
-        Position("position");
-        g_mesure = Mesure{};
-        g_mesure.debut = t;
+    if (t - g_mesure.debut >= 10 || g_releve) {
+        g_releve = false;
+        Releve(t);
     }
 }
 
