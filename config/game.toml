@@ -381,3 +381,8 @@ call = "SonsPauseBoucle"
 [[hook]]
 at = 0x30BC0
 call = "SonsPauseMinute"
+
+# Berri dans le sol (cdetv_berri.cpp)
+[[hook]]
+at = 0x808F0
+call = "BerriSol"
