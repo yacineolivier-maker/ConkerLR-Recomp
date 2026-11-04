@@ -24,6 +24,7 @@ bool InstantanesTouche(uint32_t vk);
 void InstantanesPad(int port, input::Pad& pad);
 void InstantanesUi();
 void EtiquetteNiveau();  // src/game/diag_hooks.cpp
+bool OutilsTouche(uint32_t vk);  // src/game/outils_test.cpp : Ctrl + chiffre
 // src/game/cdetv_*.cpp (correctifs repris de cdetv, MIT)
 extern bool g_cadence_60, g_vitesse_juste, g_distance_loin, g_sons_pause, g_berri_sol;
 extern uint32_t g_flou_cine, g_lueur;
@@ -48,7 +49,8 @@ void Init() {
 bool Message(void*, uint32_t msg, uintptr_t wp, intptr_t lp, intptr_t* result) {
     if (ClavierMessage(msg, wp, lp, result)) return true;
     constexpr uint32_t kKeyDown = 0x0100;  // WM_KEYDOWN
-    if (msg != kKeyDown || !(RenduKey(uint32_t(wp)) || OptionsKey(uint32_t(wp)) || InstantanesTouche(uint32_t(wp)))) return false;
+    if (msg != kKeyDown || !(RenduKey(uint32_t(wp)) || OptionsKey(uint32_t(wp)) || InstantanesTouche(uint32_t(wp)) ||
+                              OutilsTouche(uint32_t(wp)))) return false;
     *result = 0;
     return true;
 }

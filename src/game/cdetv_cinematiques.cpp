@@ -11,6 +11,7 @@
 
 namespace game {
 uint32_t g_flou_cine = 0;
+uint32_t g_compte_flou = 0;
 }  // namespace game
 
 // entrée de 0x1C71A0 : vrai = retour immédiat (on_true = "ret")
@@ -18,5 +19,7 @@ bool FlouCinematique(X86Context& ctx, uint8_t* base) {
     (void)ctx;
     (void)base;
     if (game::g_flou_cine != 0) return false;
-    return game::cdetv::R8(0x76F0E0) == 1 && game::cdetv::RF(0x84947C) != 0.0f && game::cdetv::R8(0x849480) != 0;
+    bool sans = game::cdetv::R8(0x76F0E0) == 1 && game::cdetv::RF(0x84947C) != 0.0f && game::cdetv::R8(0x849480) != 0;
+    if (sans) game::g_compte_flou++;
+    return sans;
 }

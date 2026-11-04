@@ -19,6 +19,8 @@ extern bool g_sons_pause;      // cdetv_sons_pause.cpp : sons en cours gelés pe
 extern bool g_berri_sol;       // cdetv_berri.cpp : Berri morte posée au sol, pas dedans
 extern uint32_t g_flou_cine;   // cdetv_cinematiques.cpp : 0 sans flou de profondeur, 1 celui du jeu
 extern uint32_t g_lueur;       // cdetv_lueur.cpp : intensité de la lueur en %, 100 = celle du jeu
+// combien de fois chaque correctif a agi (relevés du journal d'essai, outils_test.cpp)
+extern uint32_t g_compte_sons, g_compte_flou, g_compte_berri;
 
 namespace cdetv {
 

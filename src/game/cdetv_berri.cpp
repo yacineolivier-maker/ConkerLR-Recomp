@@ -14,6 +14,7 @@
 
 namespace game {
 bool g_berri_sol = true;
+uint32_t g_compte_berri = 0;
 }  // namespace game
 
 // entrée de 0x808F0 (matrice d'un personnage)
@@ -34,6 +35,7 @@ void BerriSol(X86Context& ctx, uint8_t* base) {
     std::string s = kernel::ReadCString(nom, 96);
     if (s.find("berimatrix\\deadpose") == std::string::npos) return;
     kernel::W32(c + 0x1C0, 0);  // la cinématique le remet à chaque image
+    game::g_compte_berri++;
     static int n = 0;
     if (n++ % 300 == 0) LOGI("berri: « %s » basculée de -90 : dessinée à plat", s.c_str());
 }

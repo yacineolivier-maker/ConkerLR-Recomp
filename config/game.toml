@@ -401,3 +401,8 @@ call = "LueurBrume"
 [[hook]]
 at = 0x1DA60B
 call = "LueurEblouissement"
+
+# outils d'essai (src/game/outils_test.cpp) : journal logs\evenements.txt, XBE_ACTIONS, Ctrl + chiffre
+[[hook]]
+at = 0x2A7B60
+call = "OutilsImage"
