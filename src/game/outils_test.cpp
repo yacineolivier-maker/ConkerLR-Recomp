@@ -10,6 +10,8 @@
 //     cadence_60=0|1  vitesse_juste=0|1  distance_loin=0|1  sons_pause=0|1  berri_sol=0|1  flou_cinematiques=0|1
 //     lueur=0..100  memoriser  teleporter  teleporter=x,y,z  position  repere=texte
 //     niveau=<nom|numéro>[,entrée] (changement de niveau en cours de partie, comme le jeu)
+//     scene=<nom|numéro> (une scène de l'histoire avec l'état de l'histoire qui la précède, par le test du jeu ;
+//     ex. « scene=End Arena » ou « scene=180 » : cinématique d'ouverture de l'arène finale, avec Berri)
 //   Instant 0 : réglages pris dès la première image (sans toucher settings.toml).
 // - Raccourcis (Ctrl + chiffre de la rangée du haut, fenêtre au premier plan) : 1 60 images/s, 2 vitesse juste,
 //   3 distance, 4 sons en pause, 5 Berri, 6 flou des cinématiques, 7 lueur 100/50/0, 8 mémoriser la position de
@@ -149,6 +151,77 @@ void ChangerNiveau(const std::string& val) {
     Journal("niveau : changement demandé vers %u (%s), entrée %u", id, NomNiveau(id).c_str(), entree);
 }
 
+// Scènes de l'histoire. Le jeu a son propre test d'endurance (0xA54B0, relevé au désassemblage)
+// : état [0x77111C] (1 = démarrer, 2 cartes, 3 chapitres, 4 scènes), mode de départ [0x6A7FF8], première scène
+// [0x6A7FFC]. En mode scènes (0xA5805), pour la scène n (n - 1 = identifiant de scène, 0x35DBD0) il remet l'état de
+// l'histoire à neuf (0x35DF40, 0x35DFC0 : un octet par scène en 0x801910, 0xEE scènes), marque faites toutes les
+// scènes qui la précèdent (0x35DD10, 0x35DDD0, 0x34FBB0), puis charge son niveau ([0x7FA1F4] = mot +8 de la table,
+// entrée 0, [0x771B9C] = mot +0xA & 0xFFF) ; il passe à la suivante 5 s après la fin de la cinématique. Table des
+// scènes 0x59E9A0, 20 octets : nom UTF-16, identifiant (& 0x1FFFFFFF ; 0x40000000 = hors liste), niveau, entrée,
+// deux adresses de drapeaux. Ex. 180 « End Arena » (identifiant 0x69, EndArena), 181-182 « Fight The Alien »,
+// 199 « End of Game Cutscene and Credits ». Ici : le test est lancé sur la scène voulue, puis arrêté dès son niveau
+// chargé, pour que la suite (cinématique, jeu) se déroule normalement, sans le test.
+constexpr uint32_t kScenes = 0x59E9A0, kFinScenes = 0x59FC3C;
+uint32_t g_scene_niveau = ~0u;  // niveau de la scène demandée, en attente de chargement
+
+std::string NomScene(uint32_t a) {
+    uint32_t n = kernel::R32(a);
+    std::string s;
+    if (!Ok(n, 2)) return s;
+    for (uint32_t i = 0; i < 64; i++) {
+        uint16_t c = kernel::R16(n + 2 * i);
+        if (!c) break;
+        s += c < 0x80 ? char(c) : '?';
+    }
+    return s;
+}
+
+void LancerScene(const std::string& val) {
+    uint32_t trouvee = 0;
+    bool chiffre = !val.empty() && val[0] >= '0' && val[0] <= '9';
+    for (uint32_t a = kScenes, i = 0; a < kFinScenes; a += 20, i++) {
+        if (!kernel::R32(a)) continue;
+        if (chiffre ? i == uint32_t(std::atoi(val.c_str())) : _stricmp(NomScene(a).c_str(), val.c_str()) == 0) {
+            trouvee = a;
+            break;
+        }
+    }
+    if (!trouvee) return Journal("scène : « %s » absente de la table des scènes", val.c_str());
+    if (cdetv::R8(0x77111C) || cdetv::R8(0x76EC82) || cdetv::R8(0x7819D6))
+        return Journal("scène : refusée (test du jeu ou chargement en cours, état %u / %u)", cdetv::R8(0x77111C),
+                       cdetv::R8(0x7819D6));
+    uint32_t id = kernel::R32(trouvee + 4) & 0x1FFFFFFF;
+    g_scene_niveau = kernel::R16(trouvee + 8);
+    kernel::W32(0x6A7FF8, 4);              // mode scènes
+    cdetv::W8(0x6A7FFC, uint8_t(id + 1));  // à partir de celle-ci (octet)
+    cdetv::W8(0x77111C, 1);                // démarrer, pris par le jeu à l'image suivante
+    Journal("scène : « %s » (n° %u, identifiant 0x%X, niveau %u %s, entrée 0x%X), état de l'histoire préparé par le "
+            "test du jeu", NomScene(trouvee).c_str(), (trouvee - kScenes) / 20, id, g_scene_niveau,
+            NomNiveau(g_scene_niveau).c_str(), kernel::R16(trouvee + 10));
+}
+
+// une fois par image : le niveau de la scène chargé, le test du jeu est arrêté (sans passer à la scène suivante)
+void SuivreScene() {
+    if (g_scene_niveau == ~0u) return;
+    static bool charge = false;  // chargement demandé par le test (sinon le niveau courant pourrait déjà être le bon)
+    if (cdetv::R8(0x77111C) < 2) return;  // pas encore démarré
+    cdetv::W8(0x77113C, 1);               // texte du test masqué (comme la touche Back)
+    if (cdetv::R8(0x7819D6) || cdetv::R8(0x76EC82)) {
+        charge = true;
+        return;
+    }
+    if (!charge || kernel::R32(0x7FA1F8) != g_scene_niveau) return;
+    charge = false;
+    uint32_t faites = 0;
+    for (uint32_t i = 0; i < 0xEE; i++) faites += cdetv::R8(0x801910 + i) != 0;
+    cdetv::W8(0x77111C, 0);
+    cdetv::W8(0x771130, 0);
+    cdetv::W8(0x77111D, 0);
+    Journal("scène : niveau %u chargé, test du jeu arrêté (%u scènes marquées dans l'état de l'histoire)",
+            g_scene_niveau, faites);
+    g_scene_niveau = ~0u;
+}
+
 // un réglage par son nom (ceux de settings.toml)
 bool Regler(const std::string& nom, int v) {
     struct B {
@@ -177,6 +250,7 @@ void Action(const std::string& a) {
     if (nom == "position") return Position("position");
     if (nom == "repere") return Journal("repère : %s", val.c_str());
     if (nom == "niveau") return ChangerNiveau(val);
+    if (nom == "scene") return LancerScene(val);
     if (nom == "releve") {
         g_releve = true;
         return Journal("relevé demandé%s%s", val.empty() ? "" : " : ", val.c_str());
@@ -301,6 +375,7 @@ void ImageOutils() {
             Action(m.action);
         }
     if (uint32_t vk = g_touche.exchange(0)) Raccourci(vk);
+    SuivreScene();
     if (!g_journal_actif) return;
 
     static uint32_t niveau = ~0u, intervalle = ~0u;

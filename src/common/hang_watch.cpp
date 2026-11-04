@@ -140,6 +140,8 @@ void StartHangWatch() {
     int seconds = std::atoi(v);
     std::thread([seconds] {
         std::this_thread::sleep_for(std::chrono::seconds(seconds));
+        // instantané demandé, pas une détection : les lignes « hang » qui suivent sont l'état des fils à cet instant
+        LOGI("diagnostic XBE_HANG : état des fils du jeu à %d s (instantané demandé, pas un blocage détecté)", seconds);
         for (const kernel::ThreadRef& t : kernel::Threads()) {
             if (!t->ctx) continue;
             const X86Context& c = *t->ctx;
