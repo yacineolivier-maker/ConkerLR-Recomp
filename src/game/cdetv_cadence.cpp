@@ -64,12 +64,15 @@ void CadenceImage(X86Context& ctx, uint8_t* base) {
     if (!intervalle) intervalle = 1;
     constexpr double kVblank = 1e9 / 60;
     g_retard += double(ecart) / kVblank - intervalle;
-    // la gigue d'une image à l'autre se compense ; un long arrêt (chargement) n'est pas rattrapé au-delà de 4
+    // la gigue d'une image à l'autre se compense ; un à-coup (jusqu'à une demi-seconde) est rattrapé 4 vblanks par
+    // image sur les images suivantes ; un long arrêt (chargement) ne l'est pas. Essai du 2026-11-04 : avec la
+    // remise à zéro au-delà de 4, 54 images/s ne donnaient que 8 vblanks manqués en 10 s (temps du jeu 0,91).
     if (g_retard < -1) g_retard = -1;
+    if (g_retard > 30) g_retard = 0;
     uint32_t manques = 0;
     if (g_retard >= 1) {
         manques = g_retard >= 4 ? 4 : uint32_t(g_retard);
-        g_retard = g_retard >= 4 ? 0 : g_retard - manques;
+        g_retard -= manques;
     }
     kernel::W32(0x7F9F30, manques);
 }

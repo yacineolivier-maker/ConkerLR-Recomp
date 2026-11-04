@@ -279,10 +279,12 @@ void ImageOutils() {
         Journal("cadence : %.1f images/s, pas moyen %.3f, %u vblanks manqués, temps du jeu par seconde %.2f",
                 g_mesure.images / duree, g_mesure.pas / g_mesure.images, g_mesure.manques,
                 g_mesure.pas / 30.0 / duree);
-        static uint32_t sons = 0, flou = 0, berri = 0;
-        Journal("correctifs : %u échéances de sons gelées en pause, %u flous de cinématique sautés, %u images de "
-                "Berri à plat", g_compte_sons - sons, g_compte_flou - flou, g_compte_berri - berri);
+        static uint32_t sons = 0, appels = 0, flou = 0, berri = 0;
+        Journal("correctifs : %u échéances de sons gelées en pause (%u mises à jour d'émetteurs pendant la pause), "
+                "%u flous de cinématique sautés, %u images de Berri à plat", g_compte_sons - sons,
+                g_appels_sons_pause - appels, g_compte_flou - flou, g_compte_berri - berri);
         sons = g_compte_sons;
+        appels = g_appels_sons_pause;
         flou = g_compte_flou;
         berri = g_compte_berri;
         Position("position");

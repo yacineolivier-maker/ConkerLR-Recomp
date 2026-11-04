@@ -12,11 +12,13 @@
 namespace game {
 bool g_sons_pause = true;
 uint32_t g_compte_sons = 0;
+uint32_t g_appels_sons_pause = 0;  // mises à jour d'émetteurs vues pendant la pause
 }  // namespace game
 
 // entrée de 0x30730 (émetteur en boucle, thiscall : ecx = émetteur)
 void SonsPauseBoucle(X86Context& ctx, uint8_t* base) {
     (void)base;
+    if (game::cdetv::R8(0x7FA275)) game::g_appels_sons_pause++;
     if (!game::g_sons_pause || !game::cdetv::R8(0x7FA275) || !game::cdetv::Ok(ctx.ecx + 0x48)) return;
     uint32_t desc = kernel::R32(ctx.ecx + 0x48);
     if (game::cdetv::Ok(desc + 4) && int32_t(kernel::R32(desc + 4)) >= 1) {
@@ -28,6 +30,7 @@ void SonsPauseBoucle(X86Context& ctx, uint8_t* base) {
 // entrée de 0x30BC0 (émetteur minuté, thiscall : ecx = émetteur)
 void SonsPauseMinute(X86Context& ctx, uint8_t* base) {
     (void)base;
+    if (game::cdetv::R8(0x7FA275)) game::g_appels_sons_pause++;
     if (!game::g_sons_pause || !game::cdetv::R8(0x7FA275) || !game::cdetv::Ok(ctx.ecx + 0x48)) return;
     if (int32_t(kernel::R32(ctx.ecx + 0x48)) >= 1) {
         kernel::W32(ctx.ecx + 0x48, kernel::R32(ctx.ecx + 0x48) + kernel::R32(0x7FA208));
