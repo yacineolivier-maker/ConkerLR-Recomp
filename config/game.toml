@@ -392,3 +392,12 @@ call = "BerriSol"
 at = 0x1C71A0
 call = "FlouCinematique"
 on_true = "ret"
+
+# réglage de la lueur (cdetv_lueur.cpp)
+[[hook]]
+at = 0x1D9C6E
+call = "LueurBrume"
+
+[[hook]]
+at = 0x1DA60B
+call = "LueurEblouissement"

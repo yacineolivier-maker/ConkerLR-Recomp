@@ -17,7 +17,7 @@ extern bool g_clavier_souris, g_souris_inverser_y;
 extern uint32_t g_souris_sensibilite;
 // src/game/cdetv_*.cpp (correctifs repris de cdetv, MIT)
 extern bool g_cadence_60, g_vitesse_juste, g_distance_loin, g_sons_pause, g_berri_sol;
-extern uint32_t g_flou_cine;
+extern uint32_t g_flou_cine, g_lueur;
 
 namespace {
 
@@ -102,6 +102,7 @@ void OptionsUi(double fps) {
     static const uint32_t kFlou[] = {0, 1};
     static const char* const kFlouNames[] = {"Sans", "Celui du jeu"};
     Choice("Flou des cinématiques", g_flou_cine, kFlou, kFlouNames, int(std::size(kFlou)));
+    Slider("Lueur", g_lueur, 0, 100, "%d %%");
     ImGui::Separator();
 
     ImGui::TextUnformatted("Commandes");
